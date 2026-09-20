@@ -41,6 +41,9 @@ Validated end-to-end on Ren'Py's official demo "The Question" (75 entries).
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[dev]"
 
+# Desktop GUI (simple Tkinter frontend):
+.\.venv\Scripts\almurrib-gui
+
 # Offline walkthrough on the bundled tiny fixture (no API key needed):
 .\.venv\Scripts\almurrib detect  fixtures\renpy_tiny
 .\.venv\Scripts\almurrib extract fixtures\renpy_tiny --db demo.db --json out\entries.json
@@ -59,6 +62,14 @@ $env:ALMURRIB_MODEL    = "gpt-4o-mini"
 ```
 
 Copy `.env.example` to `.env` for persistent local configuration.
+
+### Build the Windows app
+
+```powershell
+.\.venv\Scripts\python build_exe.py     # → dist\Almurrib.exe
+```
+
+See [docs/GUI.md](docs/GUI.md) for the GUI and executable details.
 
 ## Layout
 

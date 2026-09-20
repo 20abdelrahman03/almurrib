@@ -25,10 +25,12 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pyinstaller>=6"]
+gui = []  # Tkinter ships with CPython on Windows; nothing extra to install
 
 [project.scripts]
 almurrib = "almurrib.cli.main:main"
+almurrib-gui = "almurrib.gui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

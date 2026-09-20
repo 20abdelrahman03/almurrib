@@ -10,3 +10,4 @@ dist/
 out/
 uv_install.log
 pytest.log
+uv.lock

@@ -36,6 +36,16 @@ def _load_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+def save_env_file(path: Path, values: dict[str, str]) -> None:
+    """Write a minimal ``KEY=VALUE`` .env file (replaces existing keys).
+
+    Used by the GUI's "Save Configuration". Secrets are written to the local
+    file the user chose (``path``), never logged or echoed by this function.
+    """
+    lines = [f"{key}={value}" for key, value in values.items()]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 @dataclass(frozen=True)
 class Settings:
     """Resolved runtime settings."""

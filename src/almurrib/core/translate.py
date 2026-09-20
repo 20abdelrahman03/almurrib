@@ -1,4 +1,4 @@
-﻿"""Translation stage: real execution of the Translate pipeline stage.
+"""Translation stage: real execution of the Translate pipeline stage.
 
 Flow per the design:
 
@@ -87,13 +87,21 @@ class RealTranslateStage:
         *,
         source_lang: str = "en",
         target_lang: str = "ar",
+        progress=None,  # optional callable(done: int, total: int)
     ) -> TranslationStats:
         stats = TranslationStats(total=len(entries))
         pending: list[LocalizationEntry] = []
+        done = 0
+
+        def tick() -> None:
+            if progress is not None:
+                progress(done, stats.total)
 
         for entry in entries:
             if entry.translated_text and not self.force:
                 stats.already_translated += 1
+                done += 1
+                tick()
                 continue
 
             # 1. translation memory (same fingerprint seen before)
@@ -102,6 +110,8 @@ class RealTranslateStage:
                 entry.translated_text = tm_hit
                 entry.status = EntryStatus.TRANSLATED
                 stats.memory_hits += 1
+                done += 1
+                tick()
                 continue
 
             # 2. cache (provider+model+lang specific)
@@ -111,13 +121,18 @@ class RealTranslateStage:
                     entry.translated_text = record.translated_text
                     entry.status = EntryStatus.TRANSLATED
                     stats.cache_hits += 1
+                    done += 1
+                    tick()
                     continue
 
             pending.append(entry)
 
         # 3. provider batch translation for what is left
         if pending:
-            self._translate_pending(pending, source_lang, target_lang, stats)
+            self._translate_pending(
+                pending, source_lang, target_lang, stats,
+                progress=progress, done_offset=done,
+            )
 
         return stats
 
@@ -127,8 +142,13 @@ class RealTranslateStage:
         source_lang: str,
         target_lang: str,
         stats: TranslationStats,
+        *,
+        progress=None,
+        done_offset: int = 0,
     ) -> None:
         batch_size = max(1, self.provider.config.batch_size)
+        total = stats.total
+        done = done_offset
         for start in range(0, len(entries), batch_size):
             chunk = entries[start : start + batch_size]
             requests = [
@@ -169,6 +189,9 @@ class RealTranslateStage:
                 stats.api_translated += 1
                 if self.cache is not None:
                     self.cache.remember(entry, res.translated_text)
+                done += 1
+                if progress is not None:
+                    progress(done, total)
 
 
 def make_provider_key(label: str) -> str:

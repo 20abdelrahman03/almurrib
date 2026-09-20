@@ -70,6 +70,7 @@ def translate_entries(
     target_lang: str = "ar",
     project_id: int | None = None,
     force: bool = False,
+    progress=None,  # optional callable(done: int, total: int)
 ) -> TranslationStats:
     """Translate entries with TM + cache + provider, then persist."""
     cache = SQLiteCache(
@@ -77,7 +78,9 @@ def translate_entries(
     )
     memory = load_translation_memory(db)
     stage = RealTranslateStage(provider, cache=cache, memory=memory, force=force)
-    stats = stage.run(entries, source_lang=source_lang, target_lang=target_lang)
+    stats = stage.run(
+        entries, source_lang=source_lang, target_lang=target_lang, progress=progress
+    )
     if project_id is not None:
         EntryRepository(db).upsert_many(project_id, entries)
     return stats
