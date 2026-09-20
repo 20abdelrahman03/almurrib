@@ -26,7 +26,7 @@ def test_extract_flow_produces_normalized_entries(renpy_fixture_dir):
     result = pipeline.extract(renpy_fixture_dir, context)
 
     assert result.files_scanned >= 2
-    assert len(result.entries) == 10
+    assert len(result.entries) == 11
     # normalize stage guarantees deterministic ordering
     refs = [(e.source_refs[0].file, e.source_refs[0].line) for e in result.entries]
     assert refs == sorted(refs)

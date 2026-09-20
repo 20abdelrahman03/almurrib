@@ -3,7 +3,7 @@
 A minimal, deterministic Ren'Py-style game directory used by the test
 suite and by the CLI walkthrough in the docs.
 
-Expected extraction result (10 entries total):
+Expected extraction result (11 entries total):
 
 | File | Line | Kind | Speaker | Text |
 |---|---|---|---|---|
@@ -16,7 +16,11 @@ Expected extraction result (10 entries total):
 | game/script.rpy | 18 | menu | — | Stay outside |
 | game/script.rpy | 19 | say | Nadia | I need a moment alone. |
 | game/script.rpy | 21 | say | Eileen | This is the end of the fixture. |
+| game/script.rpy | 22 | say | Eileen | Your score is [score], {player_name}! |
 | game/tl/arabic/strings.rpy | 4 | translate_strings | — | Tiny Fixture → اللعبة الصغيرة |
+
+Line 22 exercises placeholder preservation (`[score]` Ren'Py substitution
+and `{player_name}` Python-style formatting) through the whole pipeline.
 
 Character *definitions* (`define e = Character("Eileen")`) and config
 strings in `options.rpy` are intentionally not extracted.

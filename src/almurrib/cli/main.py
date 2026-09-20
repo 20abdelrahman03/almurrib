@@ -58,6 +58,34 @@ def _build_parser() -> argparse.ArgumentParser:
     p_db = sub.add_parser("db", help="show database summary")
     p_db.add_argument("--db", type=Path, default=DEFAULT_DB)
 
+    p_translate = sub.add_parser(
+        "translate", help="translate stored entries via the configured provider"
+    )
+    p_translate.add_argument("--db", type=Path, default=DEFAULT_DB)
+    p_translate.add_argument("--source-lang", type=str, default=None)
+    p_translate.add_argument("--target-lang", type=str, default=None)
+    p_translate.add_argument("--force", action="store_true",
+                             help="retranslate even already-translated entries")
+
+    p_export = sub.add_parser(
+        "export", help="generate Ren'Py localization files from stored translations"
+    )
+    p_export.add_argument("game_dir", type=Path)
+    p_export.add_argument("--db", type=Path, default=DEFAULT_DB)
+    p_export.add_argument("--out", type=Path, default=None, help="output dir (patch)")
+    p_export.add_argument("--target-lang", type=str, default=None)
+
+    p_localize = sub.add_parser(
+        "localize", help="full workflow: detect → extract → translate → export"
+    )
+    p_localize.add_argument("game_dir", type=Path)
+    p_localize.add_argument("--db", type=Path, default=DEFAULT_DB)
+    p_localize.add_argument("--out", type=Path, default=None)
+    p_localize.add_argument("--project", type=str, default=None)
+    p_localize.add_argument("--source-lang", type=str, default=None)
+    p_localize.add_argument("--target-lang", type=str, default=None)
+    p_localize.add_argument("--force", action="store_true")
+
     return parser
 
 
@@ -132,11 +160,123 @@ def _cmd_db(args: argparse.Namespace) -> int:
     return 0
 
 
+def _settings(args: argparse.Namespace):
+    from almurrib.core.config import load_settings
+
+    overrides: dict[str, str] = {}
+    if getattr(args, "db", None) is not None:
+        overrides["ALMURRIB_DATABASE"] = str(args.db)
+    for arg_name, key in (("source_lang", "ALMURRIB_SOURCE_LANG"),
+                          ("target_lang", "ALMURRIB_TARGET_LANG"),
+                          ("out", "ALMURRIB_OUTPUT_DIR")):
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            overrides[key] = str(value)
+    return load_settings(overrides=overrides)
+
+
+def _build_provider(settings):
+    from almurrib.providers import build_provider
+
+    return build_provider(settings.provider_config())
+
+
+def _print_stats(stats) -> None:
+    print(f"  already translated : {stats.already_translated}")
+    print(f"  memory hits        : {stats.memory_hits}")
+    print(f"  cache hits         : {stats.cache_hits}")
+    print(f"  api batches        : {stats.api_calls}")
+    print(f"  api translations   : {stats.api_translated}")
+    if stats.placeholder_failures:
+        print(f"  placeholder issues : {stats.placeholder_failures} (flagged)")
+    if stats.failed:
+        print(f"  failed             : {stats.failed}")
+        for err in stats.errors[:3]:
+            print(f"    ! {err}")
+
+
+def _cmd_translate(args: argparse.Namespace) -> int:
+    settings = _settings(args)
+    provider = _build_provider(settings)
+    print(f"provider      : {provider.config.identity}")
+    print(f"endpoint      : {provider.config.base_url}  (external API)")
+    with Database(settings.database_path) as db:
+        from almurrib.core.workflow import translate_entries
+
+        repo = EntryRepository(db)
+        entries = repo.list()
+        if not entries:
+            print("(no entries stored — run 'extract' first)")
+            return 0
+        stats = translate_entries(
+            entries, db, provider,
+            source_lang=settings.source_lang, target_lang=settings.target_lang,
+        )
+        repo.upsert_for_entries(entries)
+    print(f"entries       : {stats.total}")
+    _print_stats(stats)
+    return 0
+
+
+def _cmd_export(args: argparse.Namespace) -> int:
+    settings = _settings(args)
+    pipeline = _pipeline()
+    with Database(settings.database_path) as db:
+        from almurrib.core.workflow import export_translations
+
+        written = export_translations(
+            pipeline, args.game_dir, db,
+            output_dir=settings.output_dir, target_lang=settings.target_lang,
+        )
+    print(f"exported {len(written)} file(s):")
+    for path in written:
+        print(f"  {path}")
+    print("original game files were NOT modified.")
+    return 0
+
+
+def _cmd_localize(args: argparse.Namespace) -> int:
+    settings = _settings(args)
+    pipeline = _pipeline()
+    provider = _build_provider(settings)
+    from almurrib.core.workflow import (
+        export_translations,
+        extract_and_store,
+        translate_entries,
+    )
+
+    print(f"game          : {args.game_dir}")
+    print(f"provider      : {provider.config.identity}")
+    print(f"endpoint      : {provider.config.base_url}  (external API)")
+    with Database(settings.database_path) as db:
+        entries, project_id = extract_and_store(
+            pipeline, args.game_dir, db,
+            target_lang=settings.target_lang, project_name=args.project,
+        )
+        print(f"entries       : {len(entries)} extracted")
+        stats = translate_entries(
+            entries, db, provider,
+            source_lang=settings.source_lang, target_lang=settings.target_lang,
+            project_id=project_id, force=args.force,
+        )
+        _print_stats(stats)
+        written = export_translations(
+            pipeline, args.game_dir, db,
+            output_dir=settings.output_dir, target_lang=settings.target_lang,
+        )
+    print(f"output        : {settings.output_dir} ({len(written)} file(s))")
+    print("original game files were NOT modified.")
+    return 0
+
+
 _COMMANDS = {
     "detect": _cmd_detect,
     "extract": _cmd_extract,
     "inspect": _cmd_inspect,
     "db": _cmd_db,
+    "translate": _cmd_translate,
+    "export": _cmd_export,
+    "localize": _cmd_localize,
 }
 
 

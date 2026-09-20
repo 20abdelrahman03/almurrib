@@ -90,6 +90,23 @@ class EntryRepository:
             self.upsert(project_id, entry)
         return len(entries)
 
+    def upsert_for_entries(self, entries: list[LocalizationEntry]) -> int:
+        """Persist entries against their originating project (looked up per entry).
+
+        Used when re-saving entries that already exist in the database
+        (e.g. after translation) without needing the project id at hand.
+        """
+        count = 0
+        for entry in entries:
+            row = self._conn.execute(
+                "SELECT project_id FROM localization_entries WHERE id = ?",
+                (entry.id,),
+            ).fetchone()
+            if row is not None:
+                self.upsert(int(row["project_id"]), entry)
+                count += 1
+        return count
+
     def get(self, entry_id: str) -> LocalizationEntry | None:
         row = self._conn.execute(
             "SELECT * FROM localization_entries WHERE id = ?", (entry_id,)

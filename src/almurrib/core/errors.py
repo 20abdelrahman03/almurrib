@@ -48,3 +48,51 @@ class PipelineError(AlMurribError):
     """Raised when a pipeline stage fails in an unexpected way."""
 
     stage = "pipeline"
+
+
+class TranslationError(AlMurribError):
+    """Base for translation-stage failures."""
+
+    stage = "translate"
+
+
+class ProviderError(TranslationError):
+    """Generic provider/API failure."""
+
+    stage = "translate.api"
+
+
+class AuthenticationError(ProviderError):
+    """Invalid or missing API credentials."""
+
+    stage = "translate.auth"
+
+
+class RateLimitError(ProviderError):
+    """Provider rate limit (HTTP 429) — retryable."""
+
+    stage = "translate.rate_limit"
+
+
+class ProviderTimeoutError(ProviderError):
+    """Network/response timeout — retryable."""
+
+    stage = "translate.timeout"
+
+
+class InvalidResponseError(ProviderError):
+    """The provider returned something we could not interpret."""
+
+    stage = "translate.response"
+
+
+class PlaceholderValidationError(TranslationError):
+    """A translation lost or corrupted protected placeholder tokens."""
+
+    stage = "translate.placeholders"
+
+
+class ExportError(AlMurribError):
+    """Raised when generating localization output files fails."""
+
+    stage = "export"

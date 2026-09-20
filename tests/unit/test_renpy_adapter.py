@@ -19,7 +19,7 @@ def test_detect_rejects_unrelated_dir(tmp_path):
 
 def test_extract_fixture_entries(renpy_fixture_dir):
     entries = RenPyAdapter().extract(renpy_fixture_dir)
-    assert len(entries) == 10
+    assert len(entries) == 11
 
     by_text = {e.source_text: e for e in entries}
 

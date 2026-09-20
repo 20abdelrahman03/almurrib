@@ -27,8 +27,9 @@ from pathlib import Path
 from almurrib.core.errors import ExtractionError
 
 # Character definition: define e = Character("Eileen")
+# Also handles translatable display names: define s = Character(_("Sylvie"), ...)
 DEFINE_CHARACTER_RE = re.compile(
-    r"""^\s*define\s+(?P<var>[A-Za-z_]\w*)\s*=\s*Character\(\s*(?P<quote>["'])(?P<name>.*?)(?P=quote)"""
+    r"""^\s*define\s+(?P<var>[A-Za-z_]\w*)\s*=\s*Character\(\s*(?:_\(\s*)?(?P<quote>["'])(?P<name>.*?)(?P=quote)"""
 )
 
 # Say statement with a speaker: e "Hello."  /  e 'Hello.'

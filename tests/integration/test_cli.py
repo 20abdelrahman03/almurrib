@@ -22,7 +22,7 @@ def test_extract_then_inspect_and_db(renpy_fixture_dir, tmp_path, capsys):
     assert main(["extract", str(renpy_fixture_dir), "--db", str(db_path),
                  "--json", str(json_path)]) == 0
     out = capsys.readouterr().out
-    assert "10 extracted" in out
+    assert "11 extracted" in out
 
     assert json_path.exists()
     content = json_path.read_text(encoding="utf-8")
@@ -36,7 +36,7 @@ def test_extract_then_inspect_and_db(renpy_fixture_dir, tmp_path, capsys):
 
     assert main(["db", "--db", str(db_path)]) == 0
     out = capsys.readouterr().out
-    assert "entries        : 10" in out
+    assert "entries        : 11" in out
     assert "translated" in out
 
 

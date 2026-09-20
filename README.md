@@ -7,13 +7,13 @@ translate it (locally first, cloud optional with BYO key), validate the
 result, process Arabic correctly (reshaping, BiDi, fonts), and put the
 translation back into the game.
 
-> **Status: Phase 1, first 50% (foundation).** Today the repository
-> contains the core domain model, SQLite persistence, a deterministic
-> translation cache, the pipeline abstraction, the Ren'Py adapter
-> (extraction-first), a CLI, and a deterministic test fixture. See
+> **Status: Phase 1 complete.** The repository contains the full Ren'Py
+> localization pipeline: detection → extraction → normalized entries →
+> API translation (BYO key) → cache + translation memory → placeholder
+> validation → Ren'Py translation files. See
 > [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and
-> [docs/PHASE1_STATUS.md](docs/PHASE1_STATUS.md) for what is and is not
-> implemented.
+> [docs/PHASE1_STATUS.md](docs/PHASE1_STATUS.md) for what is tested and
+> the honest limitations.
 
 ## Why an ecosystem, not a tool
 
@@ -27,8 +27,12 @@ are integrated through adapters, never forked into the core.
 ## What works today
 
 ```text
-Ren'Py fixture → Ren'Py adapter → extraction → normalized entries → SQLite → CLI inspection
+Ren'Py game → detect → extract → normalize → translate (API, BYO key)
+            → cache + translation memory → placeholder validation
+            → generate game/tl/<lang>/strings.rpy patch (originals untouched)
 ```
+
+Validated end-to-end on Ren'Py's official demo "The Question" (75 entries).
 
 ## Quick start
 
@@ -37,26 +41,42 @@ Ren'Py fixture → Ren'Py adapter → extraction → normalized entries → SQLi
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[dev]"
 
-# Try it on the bundled tiny Ren'Py fixture:
+# Offline walkthrough on the bundled tiny fixture (no API key needed):
 .\.venv\Scripts\almurrib detect  fixtures\renpy_tiny
 .\.venv\Scripts\almurrib extract fixtures\renpy_tiny --db demo.db --json out\entries.json
 .\.venv\Scripts\almurrib inspect --db demo.db
 .\.venv\Scripts\almurrib db      --db demo.db
 
-# Run the tests:
+# Full localization with a real API provider (Bring Your Own Key):
+$env:ALMURRIB_API_KEY  = "..."                              # never committed
+$env:ALMURRIB_BASE_URL = "https://api.openai.com/v1"        # or OpenRouter/Gemini/Kimi/...
+$env:ALMURRIB_MODEL    = "gpt-4o-mini"
+.\.venv\Scripts\almurrib localize <game_dir> --db demo.db --out patch\
+# → patch\game\tl\arabic\strings.rpy, ready to drop into a copy of the game
+
+# Run the tests (offline; live API test is opt-in):
 .\.venv\Scripts\python -m pytest
 ```
+
+Copy `.env.example` to `.env` for persistent local configuration.
 
 ## Layout
 
 ```text
 src/almurrib/
-  core/            normalized model, pipeline, cache, errors (engine-agnostic)
-  engine_adapters/ engine-specific code (renpy/ today; unity/unreal/... later)
+  core/            normalized model, pipeline, cache, providers, placeholders,
+                   config, translation stage, workflow (engine-agnostic)
+  engine_adapters/ engine-specific code (renpy/: parser, adapter, reinjection)
+  providers/       translation providers (openai_compat, fake) + factory
   storage/         SQLite database + repository + persistent cache
   cli/             command-line interface
-tests/             model, storage, cache, pipeline, parser, adapter, CLI tests
-fixtures/renpy_tiny/   deterministic sample Ren'Py game
+tests/
+  unit/            model, storage, cache, pipeline, parser, placeholders, ...
+  integration/     CLI workflow, fixture round-trip, real-game validation
+  live/            opt-in live API tests (ALMURRIB_RUN_LIVE_TESTS=1)
+fixtures/
+  renpy_tiny/      deterministic sample Ren'Py game
+  the_question/    Ren'Py's official demo script (real-game validation)
 docs/              architecture notes and phase status
 ```
 

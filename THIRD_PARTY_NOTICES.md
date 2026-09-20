@@ -7,6 +7,13 @@
 The Phase 1 foundation has **no third-party runtime dependencies** — it
 uses only the Python standard library (CPython, PSF License).
 
+## Test fixtures
+
+| Fixture | Source | License |
+|---|---|---|
+| `fixtures/renpy_tiny/` | created for this project | AGPL-3.0 |
+| `fixtures/the_question/game/script.rpy` | Ren'Py demo "The Question" (github.com/renpy/renpy) | MIT |
+
 ## Development dependencies
 
 | Package | License | Used for |

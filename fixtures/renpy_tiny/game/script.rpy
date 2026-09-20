@@ -19,4 +19,5 @@ label choice_scene:
             n "I need a moment alone."
 
     e "This is the end of the fixture."
+    e "Your score is [score], {player_name}!"
     return

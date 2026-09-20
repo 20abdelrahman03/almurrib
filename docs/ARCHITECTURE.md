@@ -66,9 +66,51 @@ interface, consult `SQLiteCache` before calling any model, and write
 translations back onto entries — which then persist via the existing
 repository upsert.
 
-## Deliberate limits (first half of Phase 1)
+## Translation providers (Phase 1, second half)
 
-No reinjection, no compiled `.rpyc` decompilation, no real translation, no
-QA, no Arabic shaping/BiDi, no UI. The parser is intentionally
-conservative: it extracts only unambiguous translatable text (say
-statements, menu choices, `translate strings` pairs).
+The Core depends only on the `TranslationProvider` protocol
+(`core/provider.py`): `config`, `capabilities()`, `translate()`,
+`translate_batch()`. Concrete providers live under `providers/` and are
+wired in by `providers/factory.py` — adding one never touches the pipeline.
+
+* `providers/openai_compat.py` — one stdlib-`urllib` implementation for
+  any OpenAI-compatible `POST {base_url}/chat/completions` API (OpenAI,
+  OpenRouter, Gemini's compat endpoint, Kimi, a future local llama.cpp
+  server). Selection is pure configuration (`base_url` + `model` + BYO
+  `api_key`); nothing provider-specific lives in the Core.
+* `providers/fake.py` — deterministic offline provider for tests/demos.
+
+Configuration resolves from `ALMURRIB_*` environment variables → a local
+`.env` → defaults (`core/config.py`). API keys are BYO, never committed,
+never logged; they travel only in the `Authorization` header.
+
+## Translation execution (cache + memory + placeholders)
+
+`core/translate.py::RealTranslateStage` runs per entry: skip if already
+translated → translation-memory reuse by exact fingerprint (source text +
+speaker + context) → cache lookup (keyed by engine+text+speaker+context+
+target lang + provider identity `name:model`) → provider batch →
+placeholder validation → persist + cache save. A batch failure marks only
+that batch failed and never corrupts previously-stored translations.
+
+`core/placeholders.py` conservatively protects runtime tokens
+(`{var}`, `{0}`, `%s/%d/%1$s`, `<color=red>`, `[variable]`, `\n`) and flags
+any translation that loses them.
+
+## Ren'Py reinjection
+
+`engine_adapters/renpy/reinject.py` generates Ren'Py **string-translation**
+files (`game/tl/<lang>/strings.rpy`, `old`/`new` pairs). We deliberately
+use the string mechanism — not dialogue `translate <lang> <id>:` blocks —
+because dialogue blocks require Ren'Py engine-assigned translation-unit
+identifiers that cannot be computed from static parsing; string translation
+matches by original text and is what Ren'Py documents for translations
+produced outside the launcher. Output is a patch directory; the original
+game is never modified.
+
+## Deliberate limits
+
+No compiled `.rpyc` decompilation, no Arabic shaping/BiDi/fonts (Phase 2),
+no advanced QA/glossary, no other engines yet, no UI. The parser extracts
+only unambiguous translatable text (say statements, menu choices,
+`translate strings` pairs).
