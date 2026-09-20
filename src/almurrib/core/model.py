@@ -1,0 +1,168 @@
+"""Core normalized localization model.
+
+This is the *stable internal contract* of the whole ecosystem. Every engine
+adapter converts game-specific text into :class:`LocalizationEntry`; every
+later stage (translation, memory, glossary, QA, rebuild) consumes it.
+
+Design notes:
+
+* The model is deliberately small and serializable (``to_dict`` /
+  ``from_dict``) so it can flow through JSON exports, the cache and SQLite
+  without loss.
+* Deterministic IDs: an entry's id is a content hash, so re-extracting the
+  same unchanged source text at the same location yields the same id and
+  persistence becomes naturally idempotent.
+* Future phases (glossary matches, translation memory scores, QA flags,
+  provider info) attach through ``metadata`` / ``tags`` / ``qa_flags``
+  without breaking this contract.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+
+class EngineType(str, Enum):
+    """Engines the ecosystem knows about. Only Ren'Py is implemented now;
+
+    the rest are declared so the normalized model is engine-aware from day
+    one (dependency inversion: core names engines, adapters implement them).
+    """
+
+    RENPY = "renpy"
+    UNITY = "unity"
+    UNREAL = "unreal"
+    RPGMAKER = "rpgmaker"
+    GODOT = "godot"
+    UNKNOWN = "unknown"
+
+
+class EntryStatus(str, Enum):
+    """Lifecycle of a localization entry."""
+
+    UNTRANSLATED = "untranslated"
+    TRANSLATED = "translated"
+    REVIEWED = "reviewed"
+    APPROVED = "approved"
+    FLAGGED = "flagged"  # QA or tooling flagged it for attention
+    OBSOLETE = "obsolete"  # source changed; kept for history
+
+
+def _canonical_json(payload: Any) -> str:
+    """Deterministic JSON serialization used for hashing (sorted keys)."""
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def content_hash(*parts: str | None) -> str:
+    """Deterministic SHA-256 hex digest over nullable string parts."""
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(b"\x1f")  # unit separator, avoids ambiguity between parts
+        digest.update((part or "").encode("utf-8"))
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class SourceRef:
+    """Where a localization entry came from in the original game data.
+
+    This is the information needed to eventually *write the translation
+    back* (reinjection) in the second half of Phase 1.
+    """
+
+    file: str  # path relative to the game root, POSIX style
+    line: int  # 1-based line number when known, 0 otherwise
+    statement: str = "say"  # kind of statement, e.g. say / menu / string
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "file": self.file,
+            "line": self.line,
+            "statement": self.statement,
+            "extra": dict(self.extra),
+        }
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "SourceRef":
+        return SourceRef(
+            file=str(data.get("file", "")),
+            line=int(data.get("line", 0)),
+            statement=str(data.get("statement", "say")),
+            extra=dict(data.get("extra") or {}),
+        )
+
+
+
+@dataclass
+class LocalizationEntry:
+    """One normalized, engine-agnostic unit of translatable text."""
+
+    id: str  # deterministic content hash; see make_id()
+    engine: EngineType
+    source_text: str
+    translated_text: str | None = None
+    speaker: str | None = None
+    context: str | None = None  # surrounding context that disambiguates meaning
+    status: EntryStatus = EntryStatus.UNTRANSLATED
+    source_refs: list[SourceRef] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)  # e.g. "dialogue", "menu", "choice"
+    qa_flags: list[str] = field(default_factory=list)  # filled by later QA stage
+    metadata: dict[str, Any] = field(default_factory=dict)  # extensibility point
+    version: int = 1  # model schema version for forward compatibility
+
+    MODEL_VERSION = 1
+
+    @staticmethod
+    def make_id(engine: EngineType, source_text: str, primary_ref: SourceRef) -> str:
+        """Stable id: same text at the same source location -> same id."""
+        return content_hash(engine.value, primary_ref.file, str(primary_ref.line), source_text)
+
+    @property
+    def fingerprint(self) -> str:
+        """Hash of the translatable *meaning* (ignores location).
+
+        Used by the cache and later by translation memory to answer:
+        "have we seen this exact source text under this relevant context?"
+        """
+        return content_hash(self.source_text, self.speaker, self.context)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "engine": self.engine.value,
+            "source_text": self.source_text,
+            "translated_text": self.translated_text,
+            "speaker": self.speaker,
+            "context": self.context,
+            "status": self.status.value,
+            "source_refs": [ref.to_dict() for ref in self.source_refs],
+            "tags": list(self.tags),
+            "qa_flags": list(self.qa_flags),
+            "metadata": dict(self.metadata),
+            "version": self.version,
+        }
+
+    def to_json(self) -> str:
+        return _canonical_json(self.to_dict())
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "LocalizationEntry":
+        return LocalizationEntry(
+            id=str(data["id"]),
+            engine=EngineType(data["engine"]),
+            source_text=str(data["source_text"]),
+            translated_text=data.get("translated_text"),
+            speaker=data.get("speaker"),
+            context=data.get("context"),
+            status=EntryStatus(data.get("status", EntryStatus.UNTRANSLATED.value)),
+            source_refs=[SourceRef.from_dict(r) for r in data.get("source_refs", [])],
+            tags=list(data.get("tags", [])),
+            qa_flags=list(data.get("qa_flags", [])),
+            metadata=dict(data.get("metadata") or {}),
+            version=int(data.get("version", 1)),
+        )

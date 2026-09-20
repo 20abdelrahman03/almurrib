@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "almurrib"
+version = "0.1.0"
+description = "المعرب — open-source Arabic game localization ecosystem (Phase 1, first 50%)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-only" }
+authors = [{ name = "Almurrib contributors" }]
+keywords = ["localization", "arabic", "game-localization", "renpy", "l10n", "i18n"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Topic :: Games/Entertainment",
+    "Topic :: Text Processing :: Linguistic",
+]
+# Runtime is intentionally dependency-free (stdlib only). External tools
+# (llama.cpp, engine unpackers, ...) will be integrated via adapters later.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+almurrib = "almurrib.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
