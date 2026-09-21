@@ -62,10 +62,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "translate", help="translate stored entries via the configured provider"
     )
     p_translate.add_argument("--db", type=Path, default=DEFAULT_DB)
+    p_translate.add_argument("--game-dir", type=Path, default=None,
+                             help="scope to one project's game dir (default: all projects)")
     p_translate.add_argument("--source-lang", type=str, default=None)
     p_translate.add_argument("--target-lang", type=str, default=None)
+    p_translate.add_argument("--provider", type=str, default=None)
+    p_translate.add_argument("--model", type=str, default=None)
+    p_translate.add_argument("--base-url", type=str, default=None)
     p_translate.add_argument("--force", action="store_true",
-                             help="retranslate even already-translated entries")
+                             help="ignore skips/TM/cache; call the provider again")
+    p_translate.add_argument("--reuse-machine-tm", action="store_true",
+                             help="allow cross-model reuse of machine TM")
 
     p_export = sub.add_parser(
         "export", help="generate Ren'Py localization files from stored translations"
@@ -84,7 +91,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p_localize.add_argument("--project", type=str, default=None)
     p_localize.add_argument("--source-lang", type=str, default=None)
     p_localize.add_argument("--target-lang", type=str, default=None)
-    p_localize.add_argument("--force", action="store_true")
+    p_localize.add_argument("--provider", type=str, default=None)
+    p_localize.add_argument("--model", type=str, default=None)
+    p_localize.add_argument("--base-url", type=str, default=None)
+    p_localize.add_argument("--force", action="store_true",
+                            help="ignore skips/TM/cache; call the provider again")
+    p_localize.add_argument("--reuse-machine-tm", action="store_true",
+                            help="allow cross-model reuse of machine TM")
+
+    p_clear = sub.add_parser(
+        "clear", help="wipe stored translations for a clean-slate comparison run"
+    )
+    p_clear.add_argument("--db", type=Path, default=DEFAULT_DB)
+    p_clear.add_argument("--game-dir", type=Path, default=None,
+                         help="scope to one project's game dir")
+    p_clear.add_argument("--all", action="store_true",
+                         help="clear every project in the database")
 
     return parser
 
@@ -168,10 +190,15 @@ def _settings(args: argparse.Namespace):
         overrides["ALMURRIB_DATABASE"] = str(args.db)
     for arg_name, key in (("source_lang", "ALMURRIB_SOURCE_LANG"),
                           ("target_lang", "ALMURRIB_TARGET_LANG"),
-                          ("out", "ALMURRIB_OUTPUT_DIR")):
+                          ("out", "ALMURRIB_OUTPUT_DIR"),
+                          ("provider", "ALMURRIB_PROVIDER"),
+                          ("model", "ALMURRIB_MODEL"),
+                          ("base_url", "ALMURRIB_BASE_URL")):
         value = getattr(args, arg_name, None)
         if value is not None:
             overrides[key] = str(value)
+    if getattr(args, "reuse_machine_tm", False):
+        overrides["ALMURRIB_REUSE_MACHINE_TM"] = "1"
     return load_settings(overrides=overrides)
 
 
@@ -181,18 +208,50 @@ def _build_provider(settings):
     return build_provider(settings.provider_config())
 
 
-def _print_stats(stats) -> None:
+def _print_stats(stats, *, secrets: list | None = None) -> None:
+    from almurrib.core.reporting import redact_secrets
+
+    def clean(text: str) -> str:
+        return redact_secrets(text, secrets or [])
+
     print(f"  already translated : {stats.already_translated}")
     print(f"  memory hits        : {stats.memory_hits}")
     print(f"  cache hits         : {stats.cache_hits}")
     print(f"  api batches        : {stats.api_calls}")
+    if getattr(stats, "fallback_calls", 0):
+        print(f"  fallback requests  : {stats.fallback_calls}")
     print(f"  api translations   : {stats.api_translated}")
     if stats.placeholder_failures:
         print(f"  placeholder issues : {stats.placeholder_failures} (flagged)")
     if stats.failed:
         print(f"  failed             : {stats.failed}")
         for err in stats.errors[:3]:
-            print(f"    ! {err}")
+            print(f"    ! {clean(err)}")
+
+
+def _report_failure(provider, settings, stats) -> int:
+    """Print the structured failure block (same semantics as the GUI).
+
+    Returns the process exit code: 2 when NOTHING was translated (total
+    failure), 0 on partial success (results still persisted/exportable).
+    """
+    from almurrib.core.reporting import (
+        format_translation_error,
+        provider_display_name,
+        redact_secrets,
+    )
+
+    message = format_translation_error(
+        provider=provider_display_name(
+            provider.config.provider, provider.config.identity
+        ),
+        base_url=provider.config.base_url,
+        model=provider.config.model,
+        stats=stats,
+        retries=int(settings.max_retries),
+    )
+    print(redact_secrets(message, [settings.api_key]), file=sys.stderr)
+    return 2 if stats.api_translated + stats.cache_hits + stats.memory_hits == 0 else 0
 
 
 def _cmd_translate(args: argparse.Namespace) -> int:
@@ -200,21 +259,37 @@ def _cmd_translate(args: argparse.Namespace) -> int:
     provider = _build_provider(settings)
     print(f"provider      : {provider.config.identity}")
     print(f"endpoint      : {provider.config.base_url}  (external API)")
+    if getattr(args, "force", False):
+        print("mode          : force (skipping TM/cache/already-translated)")
     with Database(settings.database_path) as db:
-        from almurrib.core.workflow import translate_entries
+        from almurrib.core.workflow import resolve_project, translate_entries
 
         repo = EntryRepository(db)
-        entries = repo.list()
+        project_id: int | None = None
+        if getattr(args, "game_dir", None) is not None:
+            project = resolve_project(db, args.game_dir)
+            if project is None:
+                print("(no stored project for this game dir — run 'extract' first)")
+                return 0
+            project_id = project.id
+        entries = repo.list(project_id=project_id)
         if not entries:
             print("(no entries stored — run 'extract' first)")
             return 0
         stats = translate_entries(
             entries, db, provider,
             source_lang=settings.source_lang, target_lang=settings.target_lang,
+            force=getattr(args, "force", False),
+            reuse_machine_tm=settings.reuse_machine_tm,
         )
-        repo.upsert_for_entries(entries)
+        if project_id is not None:
+            repo.upsert_many(project_id, entries)
+        else:
+            repo.upsert_for_entries(entries)
     print(f"entries       : {stats.total}")
-    _print_stats(stats)
+    _print_stats(stats, secrets=[settings.api_key])
+    if stats.failed:
+        return _report_failure(provider, settings, stats)
     return 0
 
 
@@ -222,11 +297,13 @@ def _cmd_export(args: argparse.Namespace) -> int:
     settings = _settings(args)
     pipeline = _pipeline()
     with Database(settings.database_path) as db:
-        from almurrib.core.workflow import export_translations
+        from almurrib.core.workflow import export_translations, resolve_project
 
+        project = resolve_project(db, args.game_dir)
         written = export_translations(
             pipeline, args.game_dir, db,
             output_dir=settings.output_dir, target_lang=settings.target_lang,
+            project_id=project.id if project else None,
         )
     print(f"exported {len(written)} file(s):")
     for path in written:
@@ -258,14 +335,43 @@ def _cmd_localize(args: argparse.Namespace) -> int:
             entries, db, provider,
             source_lang=settings.source_lang, target_lang=settings.target_lang,
             project_id=project_id, force=args.force,
+            reuse_machine_tm=settings.reuse_machine_tm,
         )
-        _print_stats(stats)
+        _print_stats(stats, secrets=[settings.api_key])
         written = export_translations(
             pipeline, args.game_dir, db,
             output_dir=settings.output_dir, target_lang=settings.target_lang,
+            project_id=project_id,
         )
+        exit_code = 0
+        if stats.failed:
+            exit_code = _report_failure(provider, settings, stats)
     print(f"output        : {settings.output_dir} ({len(written)} file(s))")
     print("original game files were NOT modified.")
+    return exit_code
+
+
+def _cmd_clear(args: argparse.Namespace) -> int:
+    from almurrib.core.workflow import clear_project_translations, resolve_project
+
+    with Database(args.db) as db:
+        repo = EntryRepository(db)
+        if getattr(args, "game_dir", None) is not None:
+            project = resolve_project(db, args.game_dir)
+            if project is None:
+                print("(no stored project for this game dir — nothing to clear)")
+                return 0
+            project_ids = [project.id]
+        elif getattr(args, "all", False):
+            project_ids = [row["id"] for row in db.connection.execute(
+                "SELECT id FROM projects").fetchall()]
+        else:
+            print("error: specify --game-dir or --all (refusing to guess scope)",
+                  file=sys.stderr)
+            return 2
+        total = sum(clear_project_translations(db, pid) for pid in project_ids)
+    print(f"cleared {total} translation(s) across {len(project_ids)} project(s)")
+    print("source entries kept; obsolete history preserved; matching cache dropped.")
     return 0
 
 
@@ -277,6 +383,7 @@ _COMMANDS = {
     "translate": _cmd_translate,
     "export": _cmd_export,
     "localize": _cmd_localize,
+    "clear": _cmd_clear,
 }
 
 

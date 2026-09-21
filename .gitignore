@@ -11,3 +11,4 @@ out/
 uv_install.log
 pytest.log
 uv.lock
+.almurrib_model_cache.json

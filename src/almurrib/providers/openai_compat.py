@@ -35,9 +35,35 @@ from almurrib.core.provider import (
 from almurrib.providers.prompts import build_messages
 
 
+class _FormatRefusedError(ProviderError):
+    """The server refused `response_format` (retry once without it)."""
+
+    stage = "translate.api"
+
+
+def _extract_error_message(raw: str) -> str | None:
+    """Pull a human message out of an OpenAI-style error body.
+
+    Expected shape: {"error": {"message": "...", "code": ...}}. Returns the
+    message string, or None if the body isn't that shape. Never includes
+    anything but the provider's own message — no headers, no keys.
+    """
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    error = data.get("error") if isinstance(data, dict) else None
+    if isinstance(error, dict) and isinstance(error.get("message"), str):
+        return error["message"]
+    if isinstance(data, dict) and isinstance(data.get("message"), str):
+        return data["message"]
+    return None
+
+
 class OpenAICompatibleProvider:
     def __init__(self, config: ProviderConfig) -> None:
         self._config = config
+        self.last_fallback_calls: int = 0  # individual retries after bad batch
 
     @property
     def config(self) -> ProviderConfig:
@@ -48,6 +74,9 @@ class OpenAICompatibleProvider:
             supports_batch=True,
             supports_context=True,
             max_batch_size=self._config.batch_size,
+            supports_json_object=self._config.supports_json_object,
+            supports_model_list=True,
+            supports_chat=True,
         )
 
     # -- public API -------------------------------------------------------
@@ -55,15 +84,46 @@ class OpenAICompatibleProvider:
     def translate(self, request: TranslationRequest) -> TranslationResult:
         return self.translate_batch([request])[0]
 
-    def translate_batch(self, requests: list[TranslationRequest]) -> list[TranslationResult]:
-        payload = {
+    def _payload(
+        self, requests: list[TranslationRequest], *, structured: bool
+    ) -> dict:
+        payload: dict = {
             "model": self._config.model,
             "messages": build_messages(requests),
             "temperature": 0.2,
-            "response_format": {"type": "json_object"},
         }
-        body = self._post_json(payload)
-        return self._parse_response(body, requests)
+        if structured:
+            payload["response_format"] = {"type": "json_object"}
+        return payload
+
+    def translate_batch(self, requests: list[TranslationRequest]) -> list[TranslationResult]:
+        self.last_fallback_calls = 0
+        structured = self._config.supports_json_object is not False
+        try:
+            body = self._post_json(self._payload(requests, structured=structured))
+        except _FormatRefusedError:
+            # The server (often a router fronting a model without JSON mode)
+            # rejects response_format: retry once as plain structured text.
+            # The prompt still demands strict JSON, so parsing is unchanged.
+            structured = False
+            body = self._post_json(self._payload(requests, structured=False))
+        try:
+            return self._parse_response(body, requests)
+        except InvalidResponseError:
+            if len(requests) <= 1:
+                raise
+            # Some models (e.g. pure text completion models) ignore
+            # response_format and won't return the strict batch JSON object.
+            # Degrade gracefully: translate each entry individually so one
+            # malformed batch does not fail the whole batch.
+            results: list[TranslationResult] = []
+            for req in requests:
+                single_body = self._post_json(
+                    self._payload([req], structured=structured)
+                )
+                self.last_fallback_calls += 1
+                results.extend(self._parse_response(single_body, [req]))
+            return results
 
 
     # -- HTTP with bounded retry -------------------------------------------
@@ -85,18 +145,56 @@ class OpenAICompatibleProvider:
                 with urllib.request.urlopen(request, timeout=self._config.timeout_seconds) as resp:
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
-                detail = exc.read().decode("utf-8", errors="replace")[:300]
+                raw = exc.read().decode("utf-8", errors="replace")
+                provider_message = _extract_error_message(raw)
+                detail = provider_message or raw[:300]
                 if exc.code in (401, 403):
                     raise AuthenticationError(
-                        f"provider rejected credentials (HTTP {exc.code})",
-                        hint="check ALMURRIB_API_KEY for the configured provider.",
+                        f"invalid or missing API key (HTTP {exc.code})"
+                        + (f": {detail}" if detail else ""),
+                        hint="check the API key for the configured provider.",
+                        http_status=exc.code,
+                        provider_message=provider_message,
+                    ) from exc
+                if exc.code == 404:
+                    raise ProviderError(
+                        f"model or endpoint not found (HTTP 404)"
+                        + (f": {detail}" if detail else ""),
+                        hint="check ALMURRIB_MODEL and ALMURRIB_BASE_URL.",
+                        http_status=exc.code,
+                        provider_message=provider_message,
                     ) from exc
                 if exc.code == 429:
-                    last_error = RateLimitError(f"rate limited (HTTP 429): {detail}")
+                    last_error = RateLimitError(
+                        f"rate limit exceeded (HTTP 429)"
+                        + (f": {detail}" if detail else ""),
+                        http_status=exc.code,
+                        provider_message=provider_message,
+                    )
                 elif 500 <= exc.code < 600:
-                    last_error = ProviderError(f"server error (HTTP {exc.code}): {detail}")
+                    last_error = ProviderError(
+                        f"provider server error (HTTP {exc.code})"
+                        + (f": {detail}" if detail else ""),
+                        http_status=exc.code,
+                        provider_message=provider_message,
+                    )
                 else:
-                    raise ProviderError(f"HTTP {exc.code}: {detail}") from exc
+                    if exc.code == 400 and (
+                        "response_format" in (provider_message or "")
+                        or "response_format" in raw
+                    ):
+                        raise _FormatRefusedError(
+                            f"server refused response_format (HTTP 400)"
+                            + (f": {detail}" if detail else ""),
+                            hint="retrying once without structured output.",
+                            http_status=exc.code,
+                            provider_message=provider_message,
+                        ) from exc
+                    raise ProviderError(
+                        f"HTTP {exc.code}" + (f": {detail}" if detail else ""),
+                        http_status=exc.code,
+                        provider_message=provider_message,
+                    ) from exc
             except TimeoutError as exc:
                 last_error = ProviderTimeoutError(f"request timed out: {exc}")
             except urllib.error.URLError as exc:
@@ -125,37 +223,18 @@ class OpenAICompatibleProvider:
             raise InvalidResponseError(
                 "response missing choices[0].message.content"
             ) from exc
-
-        content = content.strip()
-        if content.startswith("```"):  # tolerate code fences despite instructions
-            content = content.strip("`")
-            content = content[content.find("\n") + 1 :] if "\n" in content else content
-        try:
-            mapping = json.loads(content)
-        except json.JSONDecodeError as exc:
+        if not isinstance(content, str):
             raise InvalidResponseError(
-                f"model output was not a JSON object: {content[:120]!r}"
-            ) from exc
-        if not isinstance(mapping, dict):
-            raise InvalidResponseError("model output JSON was not an object")
+                "response content was not text"
+                f" (got {type(content).__name__}; tool-call/empty replies"
+                " cannot be translated)"
+            )
 
-        results: list[TranslationResult] = []
-        missing: list[str] = []
-        for req in requests:
-            text = mapping.get(req.entry_id)
-            if not isinstance(text, str) or not text.strip():
-                missing.append(req.entry_id)
-                continue
-            results.append(
-                TranslationResult(
-                    entry_id=req.entry_id,
-                    translated_text=text,
-                    provider=self._config.provider,
-                    model=self._config.model,
-                )
-            )
-        if missing and not results:
-            raise InvalidResponseError(
-                f"model output did not contain any requested ids (missing: {missing[:3]}...)"
-            )
-        return results
+        from almurrib.providers.batch_json import parse_id_mapping
+
+        return parse_id_mapping(
+            content,
+            requests,
+            provider=self._config.provider,
+            model=self._config.model,
+        )

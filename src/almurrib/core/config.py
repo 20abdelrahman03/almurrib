@@ -13,6 +13,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from almurrib.core.paths import app_base_dir
 from almurrib.core.provider import ProviderConfig
 
 ENV_PREFIX = "ALMURRIB_"
@@ -37,13 +38,29 @@ def _load_env_file(path: Path) -> dict[str, str]:
 
 
 def save_env_file(path: Path, values: dict[str, str]) -> None:
-    """Write a minimal ``KEY=VALUE`` .env file (replaces existing keys).
+    """Write a minimal ``KEY=VALUE`` .env file (merges into existing keys).
 
-    Used by the GUI's "Save Configuration". Secrets are written to the local
-    file the user chose (``path``), never logged or echoed by this function.
+    Used by the GUI's "Save Configuration". Keys present in ``values`` are
+    replaced in place (preserving comments, blank lines and unknown keys);
+    missing keys are appended. Secrets are written to the local file the
+    user chose (``path``), never logged or echoed by this function.
     """
-    lines = [f"{key}={value}" for key, value in values.items()]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    existing: list[str] = []
+    if path.exists():
+        existing = path.read_text(encoding="utf-8").splitlines()
+    remaining = dict(values)
+    out: list[str] = []
+    for raw in existing:
+        stripped = raw.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.partition("=")[0].strip()
+            if key in remaining:
+                out.append(f"{key}={remaining.pop(key)}")
+                continue
+        out.append(raw)
+    for key, value in remaining.items():
+        out.append(f"{key}={value}")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 @dataclass(frozen=True)
@@ -61,6 +78,7 @@ class Settings:
     max_retries: int
     database_path: Path
     output_dir: Path
+    reuse_machine_tm: bool
 
     def provider_config(self) -> ProviderConfig:
         if not self.api_key:
@@ -81,6 +99,30 @@ class Settings:
         )
 
 
+def candidate_env_files() -> list[Path]:
+    """Ordered .env search locations (first existing wins).
+
+    Development: the working directory. Frozen EXE: next to the executable,
+    falling back to the launch working directory when it holds a config
+    (covers terminal launches from the project folder). Documented in
+    docs/GUI.md; Save always targets the app base dir.
+    """
+    base = app_base_dir() / ".env"
+    candidates = [base]
+    cwd = Path.cwd() / ".env"
+    if cwd != base:
+        candidates.append(cwd)
+    return candidates
+
+
+def default_env_file() -> Path:
+    """Where the .env is read from (first existing candidate) or written to."""
+    for candidate in candidate_env_files():
+        if candidate.exists():
+            return candidate
+    return candidate_env_files()[0]
+
+
 def load_settings(
     *,
     env_file: Path | None = None,
@@ -89,7 +131,7 @@ def load_settings(
 ) -> Settings:
     """Resolve settings from .env file, process env, and explicit overrides."""
     environ = dict(os.environ if environ is None else environ)
-    file_values = _load_env_file(env_file or Path(".env"))
+    file_values = _load_env_file(env_file or default_env_file())
 
     def get(key: str, default: str = "") -> str:
         env_key = ENV_PREFIX + key
@@ -113,6 +155,12 @@ def load_settings(
         except ValueError:
             return default
 
+    def get_bool(key: str, default: bool) -> bool:
+        raw = get(key).strip().lower()
+        if not raw:
+            return default
+        return raw in ("1", "true", "yes", "on")
+
     return Settings(
         provider=get("PROVIDER", DEFAULT_PROVIDER),
         base_url=get("BASE_URL", DEFAULT_BASE_URL),
@@ -125,4 +173,5 @@ def load_settings(
         max_retries=get_int("MAX_RETRIES", 3),
         database_path=Path(get("DATABASE", "almurrib.db")),
         output_dir=Path(get("OUTPUT_DIR", "out")),
+        reuse_machine_tm=get_bool("REUSE_MACHINE_TM", False),
     )

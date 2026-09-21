@@ -100,3 +100,37 @@ def test_write_patch_requires_translations(tmp_path):
             target_lang="arabic",
             output_dir=tmp_path / "patch",
         )
+
+
+def test_identical_pairs_deduplicated_with_all_locations():
+    entries = [
+        _say("Hello!", "مرحبًا!", 9, speaker="Eileen"),
+        _say("Hello!", "مرحبًا!", 42, speaker="Nadia"),
+    ]
+    files = generate_translation_files(entries, target_lang="arabic")
+    content = files["game/tl/arabic/strings.rpy"]
+    assert content.count('old "Hello!"') == 1
+    assert content.count('new "مرحبًا!"') == 1
+    assert "game/script.rpy:9" in content
+    assert "game/script.rpy:42" in content
+
+
+def test_differing_translations_kept_with_note():
+    entries = [
+        _say("Hello!", "مرحبًا!", 9),
+        _say("Hello!", "أهلاً!", 42),
+    ]
+    files = generate_translation_files(entries, target_lang="arabic")
+    content = files["game/tl/arabic/strings.rpy"]
+    assert content.count('old "Hello!"') == 2
+    assert "NOTE" in content
+
+
+def test_unsafe_target_lang_rejected(tmp_path):
+    for bad in ("../x", "..\\x", "/", "a/b", "ar:1", "", " a", "x" * 40):
+        with pytest.raises(ExportError):
+            generate_translation_files(
+                [_say("Hi", "مرحبًا", 1)], target_lang=bad)
+    for good in ("ar", "arabic", "fr", "de", "ja", "pt-BR", "zh_Hans"):
+        files = generate_translation_files([_say("Hi", "مرحبًا", 1)], target_lang=good)
+        assert f"game/tl/{good}/strings.rpy" in files

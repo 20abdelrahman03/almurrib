@@ -57,9 +57,25 @@ class TranslationError(AlMurribError):
 
 
 class ProviderError(TranslationError):
-    """Generic provider/API failure."""
+    """Generic provider/API failure.
+
+    Carries structured details (HTTP status, provider message) so the GUI
+    can show the *actual* cause instead of a bare failure count.
+    """
 
     stage = "translate.api"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        http_status: int | None = None,
+        provider_message: str | None = None,
+    ) -> None:
+        super().__init__(message, hint=hint)
+        self.http_status = http_status
+        self.provider_message = provider_message
 
 
 class AuthenticationError(ProviderError):

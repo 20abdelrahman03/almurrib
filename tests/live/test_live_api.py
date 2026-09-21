@@ -44,3 +44,23 @@ def test_live_translation_preserves_placeholders():
     assert result.translated_text.strip()
     report = validate_translation(request.source_text, result.translated_text)
     assert report.ok, f"placeholders lost: {report.missing}"
+
+
+def test_live_model_discovery():
+    """Listing models works against the configured provider (if supported)."""
+    from almurrib.providers import fetch_models, get_definition
+
+    settings = load_settings()
+    definition = get_definition(settings.provider_config().provider)
+    if definition is None or definition.discovery == "none":
+        pytest.skip("provider has no discovery strategy")
+    if not settings.api_key:
+        pytest.skip("no API key configured")
+    models = fetch_models(
+        base_url=settings.base_url,
+        api_key=settings.api_key,
+        models_path=definition.models_path,
+        discovery=definition.discovery,
+    )
+    assert models, "model catalog came back empty"
+    assert all(m.id for m in models)

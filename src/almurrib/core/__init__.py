@@ -5,6 +5,7 @@ from almurrib.core.model import (
     EntryStatus,
     LocalizationEntry,
     SourceRef,
+    TranslationSource,
     content_hash,
 )
 from almurrib.core.engine import EngineAdapter, DetectionResult
@@ -14,6 +15,7 @@ __all__ = [
     "EntryStatus",
     "LocalizationEntry",
     "SourceRef",
+    "TranslationSource",
     "content_hash",
     "EngineAdapter",
     "DetectionResult",

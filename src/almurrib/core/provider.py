@@ -27,6 +27,10 @@ class ProviderConfig:
     timeout_seconds: float = 60.0
     batch_size: int = 20
     max_retries: int = 3
+    # Structured-output expectation: True = always send response_format,
+    # False = never send it, None (default) = send it but retry once without
+    # it if the server refuses (model-dependent support, e.g. routers).
+    supports_json_object: bool | None = None
 
     @property
     def identity(self) -> str:
@@ -39,6 +43,10 @@ class ProviderCapabilities:
     supports_batch: bool = False
     supports_context: bool = True
     max_batch_size: int = 20
+    supports_json_object: bool | None = None  # None = model-dependent
+    supports_json_schema: bool = False
+    supports_model_list: bool = True
+    supports_chat: bool = True
 
 
 @dataclass

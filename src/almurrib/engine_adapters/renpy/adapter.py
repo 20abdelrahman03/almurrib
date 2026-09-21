@@ -16,6 +16,7 @@ from almurrib.core.model import (
     EntryStatus,
     LocalizationEntry,
     SourceRef,
+    TranslationSource,
 )
 from almurrib.engine_adapters.renpy.parser import RawStatement, parse_rpy
 
@@ -117,4 +118,10 @@ class RenPyAdapter:
                 "statement_kind": statement_kind,
                 **({"speaker_var": raw.speaker_var} if raw.speaker_var else {}),
             },
+            # Pairs that ship with the game are pre-existing human/imported
+            # work, not our machine output.
+            translation_source=(
+                TranslationSource.IMPORTED.value if translated
+                else TranslationSource.MACHINE.value
+            ),
         )

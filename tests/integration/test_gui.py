@@ -72,6 +72,225 @@ def _display_available() -> bool:
     return bool(os.environ.get("DISPLAY"))
 
 
+def test_format_translation_error_shows_http_details():
+    """Provider failure must reach the GUI log with useful details, no key."""
+    pytest.importorskip("tkinter")
+    from almurrib.core.translate import TranslationStats
+    from almurrib.gui.app import format_translation_error
+
+    stats = TranslationStats(
+        total=75,
+        failed=75,
+        errors=["[translate.auth] invalid or missing API key (HTTP 401): Invalid API key"],
+        first_error="[translate.auth] invalid or missing API key (HTTP 401): Invalid API key",
+        first_http_status=401,
+        first_provider_message="Invalid API key",
+    )
+    message = format_translation_error(
+        provider="openai_compat",
+        base_url="https://openrouter.ai/api/v1",
+        model="qwen/qwen3-30b-a3b:free",
+        stats=stats,
+    )
+    assert "Provider: openai_compat" in message
+    assert "Base URL: https://openrouter.ai/api/v1" in message
+    assert "Model: qwen/qwen3-30b-a3b:free" in message
+    assert "HTTP Status: 401" in message
+    assert "Message: Invalid API key" in message
+    assert "sk-" not in message and "Bearer" not in message
+
+
+def test_format_translation_error_without_structured_details():
+    """Non-HTTP failures still produce a useful Cause line."""
+    pytest.importorskip("tkinter")
+    from almurrib.core.translate import TranslationStats
+    from almurrib.gui.app import format_translation_error
+
+    stats = TranslationStats(total=3, failed=3, first_error="boom")
+    message = format_translation_error(
+        provider="openai_compat", base_url="https://x", model="m", stats=stats
+    )
+    assert "Translation failed (3/3 failed)" in message
+    assert "HTTP Status" not in message
+    assert "Cause: boom" in message
+
+
+def test_provider_dropdown_lists_registry(tmp_path, monkeypatch):
+    """Provider selector comes from the registry (no GUI rewrite per provider)."""
+    pytest.importorskip("tkinter")
+    if not _display_available():
+        pytest.skip("no display available")
+
+    from tkinter import Tk
+
+    from almurrib.gui.app import AlmurribApp
+    from almurrib.providers.registry import PROVIDERS
+
+    root = Tk()
+    root.withdraw()
+    try:
+        app = AlmurribApp(root)
+        values = list(app.prov_combo.cget("values"))
+        for definition in PROVIDERS.values():
+            assert definition.display_name in values
+        # selecting a provider refreshes the base URL, keeps other fields
+        app.provider_name.set("Cohere")
+        app._on_provider_changed()
+        assert app.base_url.get() == "https://api.cohere.com"
+    finally:
+        root.destroy()
+
+
+def test_fallback_models_shown_without_fetch(tmp_path):
+    """The model dropdown is never empty, even offline with no key."""
+    pytest.importorskip("tkinter")
+    if not _display_available():
+        pytest.skip("no display available")
+
+    from tkinter import Tk
+
+    from almurrib.gui.app import AlmurribApp
+
+    root = Tk()
+    root.withdraw()
+    try:
+        app = AlmurribApp(root)
+        app.provider_name.set("OpenRouter")
+        app._on_provider_changed()
+        values = list(app.model_combo.cget("values"))
+        assert "qwen/qwen3-30b-a3b:free" in values
+        # search narrows the fallback pool without rewriting typed text
+        app.model_combo.set("qwen")
+        app._filter_models()
+        filtered = list(app.model_combo.cget("values"))
+        assert filtered and all("qwen" in v for v in filtered)
+        assert app.model_combo.get() == "qwen"
+    finally:
+        root.destroy()
+
+
+def test_gui_receives_live_models_not_static_list(monkeypatch):
+    """Regression: the OpenAI dropdown must reflect the live API response,
+    not the hard-coded fallback ids."""
+    pytest.importorskip("tkinter")
+    if not _display_available():
+        pytest.skip("no display available")
+
+    import json
+    from tkinter import Tk
+
+    from almurrib.gui.app import AlmurribApp
+
+    class _Resp:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout=0):
+        body = json.dumps({"data": [
+            {"id": "gpt-5-brand-new"},
+            {"id": "gpt-4o-mini"},
+        ]}).encode()
+        return _Resp(body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    root = Tk()
+    root.withdraw()
+    try:
+        app = AlmurribApp(root)
+        app.provider_name.set("OpenAI")
+        app.base_url.set("https://api.openai.com/v1")
+        app.api_key.set("test-key")
+        result = app._refresh_models_sync()
+        assert result.source == "live"
+        app._apply_models(result.models, result.source)
+        values = list(app.model_combo.cget("values"))
+        assert "gpt-5-brand-new" in values  # live id, absent from static list
+        assert "Live provider API" in app.models_source.get()
+    finally:
+        root.destroy()
+
+
+def test_legacy_provider_display_resolves(tmp_path):
+    """Early .env files with provider=openai_compat show a real label."""
+    pytest.importorskip("tkinter")
+    if not _display_available():
+        pytest.skip("no display available")
+
+    from tkinter import Tk
+
+    from almurrib.gui.app import AlmurribApp, _provider_display
+
+    assert _provider_display("openai_compat") == "OpenAI-Compatible (custom URL)"
+    root = Tk()
+    root.withdraw()
+    try:
+        app = AlmurribApp(root)
+        assert "OpenAI-Compatible (custom URL)" in list(
+            app.prov_combo.cget("values"))
+    finally:
+        root.destroy()
+
+
+def test_apply_models_populates_selector(tmp_path):
+    pytest.importorskip("tkinter")
+    if not _display_available():
+        pytest.skip("no display available")
+
+    from tkinter import Tk
+
+    from almurrib.gui.app import AlmurribApp
+    from almurrib.providers.discovery import ModelInfo
+
+    root = Tk()
+    root.withdraw()
+    try:
+        app = AlmurribApp(root)
+        from almurrib.providers.discovery import SOURCE_LIVE
+        app._apply_models([ModelInfo(id="a"), ModelInfo(id="b")], SOURCE_LIVE)
+        assert list(app.model_combo.cget("values")) == ["a", "b"]
+        assert "Live provider API" in app.models_source.get()
+        # filter narrows the dropdown but never rewrites typed text
+        app.model_combo.set("b")
+        app._filter_models()
+        assert list(app.model_combo.cget("values")) == ["b"]
+        assert app.model_combo.get() == "b"
+    finally:
+        root.destroy()
+
+
+def test_output_defaults_anchored_to_app_base(tmp_path, monkeypatch):
+    """Double-clicking the EXE elsewhere must not scatter DB/output files."""
+    pytest.importorskip("tkinter")
+    if not _display_available():
+        pytest.skip("no display available")
+
+    from tkinter import Tk
+
+    from almurrib.gui.app import AlmurribApp
+
+    root = Tk()
+    root.withdraw()
+    try:
+        monkeypatch.chdir(tmp_path)  # launch CWD differs from repo
+        app = AlmurribApp(root)
+        from almurrib.core.paths import app_base_dir
+
+        base = app_base_dir()
+        assert str(app.db_path.get()).startswith(str(base))
+        assert str(app.output_dir.get()).startswith(str(base))
+    finally:
+        root.destroy()
+
+
 def test_translate_progress_callback_fires(renpy_fixture_dir, tmp_path):
     """The translate stage reports real progress the GUI can bind to."""
     from almurrib.core.pipeline import LocalizationPipeline

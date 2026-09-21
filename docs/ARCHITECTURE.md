@@ -1,4 +1,4 @@
-# Architecture Notes — Phase 1 (first 50%)
+# Architecture Notes — Phase 1 (stable)
 
 ## Why the core is separated from the Ren'Py adapter
 
@@ -108,9 +108,46 @@ matches by original text and is what Ren'Py documents for translations
 produced outside the launcher. Output is a patch directory; the original
 game is never modified.
 
+## Translation provenance and memory rules
+
+Every stored translation carries `translation_provider`, `translation_model`
+and `translation_source` (`machine` | `human` | `imported`, schema v2). The
+provider/model cache stays exact-keyed; translation memory reuses
+human/imported work universally but machine output only for the same
+`provider:model` that produced it — unless `ALMURRIB_REUSE_MACHINE_TM=1`
+explicitly permits cross-model reuse. Legacy rows without provenance are
+grandfathered as reusable so existing databases keep working.
+
+## Lifecycle, force and repeated runs
+
+Re-extraction is coherent: fresh entries without translations never reset
+stored text/status/QA/provenance, and human `REVIEWED`/`APPROVED` states are
+never demoted by re-imports. Entries missing from a fresh extraction become
+`OBSOLETE` (history kept, excluded from translate/TM/export). `force`
+ignores already-translated text, TM and cache reads, then overwrites
+provenance. Re-runs are idempotent: stable row counts, byte-stable exports.
+
+## Provider ecosystem
+
+`providers/registry.py` defines every provider as data (id, protocol,
+endpoints, discovery, verified flag). `openai_chat` definitions share the
+generic transport; `cohere` has the one native adapter. `Fetch Models`
+queries `GET {base}/models` (Cohere: `/v1/models?endpoint=chat`) and the GUI
+discovers new registry entries with zero GUI changes. See
+[PROVIDERS.md](PROVIDERS.md) for the verified matrix.
+
+## Storage notes
+
+Schema migrations are append-only (`schema_migrations`, currently v2).
+Bulk upserts run in a single transaction; databases use WAL mode. Export
+deduplicates identical source/translation pairs (differing translations for
+one source are kept with a NOTE) and validates `target_lang` identifiers.
+
 ## Deliberate limits
 
 No compiled `.rpyc` decompilation, no Arabic shaping/BiDi/fonts (Phase 2),
-no advanced QA/glossary, no other engines yet, no UI. The parser extracts
+no advanced QA/glossary, no other engines yet. The parser extracts
 only unambiguous translatable text (say statements, menu choices,
-`translate strings` pairs).
+`translate strings` pairs). The Tkinter GUI is a developer tool with
+provider/model discovery, testing, logging and run options — not a
+commercial localization workbench.

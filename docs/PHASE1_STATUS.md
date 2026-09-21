@@ -1,4 +1,4 @@
-# Phase 1 Status — Complete (both halves)
+# Phase 1 Status — Stable (hardened)
 
 ## ✅ What works
 
@@ -19,7 +19,14 @@
 ✅ Ren'Py reinjection: string-translation patch (game/tl/<lang>/strings.rpy),
    original game never modified
 ✅ CLI: detect / extract / translate / export / localize / inspect / db
-✅ Tests: 66 passed + 1 live test (opt-in via ALMURRIB_RUN_LIVE_TESTS=1)
+   (force, provider/model/base-url flags, per-project scoping, exit codes)
+✅ Provider registry (20+ definitions) + model discovery + Test Connection
+✅ Cohere native adapter (chat + discovery, Command A family selectable)
+✅ Provenance (provider/model/source), TM gating, OBSOLETE lifecycle
+✅ Idempotent repeated runs, force semantics, deduplicated export
+✅ GUI: provider/model discovery, force checkbox, output picker, log tools
+✅ Offline test suite passes (live API + discovery tests opt-in via
+   ALMURRIB_RUN_LIVE_TESTS=1)
 ✅ Real-game validated on Ren'Py's official demo "The Question" (75 entries)
 ```
 
@@ -66,5 +73,6 @@ almurrib localize <game_dir> --out patch\
 ## Phase 2 and beyond (not part of Phase 1)
 
 Arabic reshaping/BiDi/fonts, advanced QA, glossary, character/style system,
-other engines, runtime injection, TMX/XLIFF sharing, UI.
+other engines, runtime injection, TMX/XLIFF sharing, native Anthropic/Gemini
+adapters, polished commercial UI.
 

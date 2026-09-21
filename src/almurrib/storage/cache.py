@@ -80,3 +80,18 @@ class SQLiteCache:
     def __len__(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM translation_cache").fetchone()
         return int(row[0])
+
+    def delete_for_fingerprints(self, fingerprints: set[str]) -> int:
+        """Drop cached rows for the given meaning-hashes (clean-slate runs).
+
+        Fingerprints are meaning-scoped, so sibling projects sharing an
+        identical line lose that cached row too — it rebuilds on next use.
+        """
+        if not fingerprints:
+            return 0
+        with self._conn:
+            cursor = self._conn.executemany(
+                "DELETE FROM translation_cache WHERE entry_fingerprint = ?",
+                [(fp,) for fp in fingerprints],
+            )
+        return cursor.rowcount if cursor.rowcount is not None else 0

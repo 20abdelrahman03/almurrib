@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from almurrib.core.cache import DEFAULT_PROVIDER, make_cache_key
-from almurrib.core.model import EntryStatus, LocalizationEntry
+from almurrib.core.model import EntryStatus, LocalizationEntry, TranslationSource
 from almurrib.core.placeholders import extract_placeholders, validate_translation
 from almurrib.core.provider import TranslationProvider, TranslationRequest
 
@@ -33,19 +33,59 @@ class TranslationStats:
     memory_hits: int = 0
     cache_hits: int = 0
     api_calls: int = 0
+    fallback_calls: int = 0  # individual requests after a malformed batch
     api_translated: int = 0
     placeholder_failures: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
+    first_error: str | None = None  # the first provider failure cause
+    first_http_status: int | None = None  # structured HTTP status, if known
+    first_provider_message: str | None = None  # provider's own message, if any
+
+
+@dataclass(frozen=True)
+class TMRecord:
+    """One translation-memory candidate with its provenance."""
+
+    text: str
+    source: str = TranslationSource.MACHINE.value
+    provider: str | None = None  # provider identity ("name:model"), if known
+    model: str | None = None
+
+
+def tm_reusable(
+    record: TMRecord, *, current_identity: str, allow_cross_model_machine: bool
+) -> bool:
+    """Decide whether a TM candidate may satisfy the current run.
+
+    Human/imported work is universal. Machine output is only reused for the
+    same provider:model that produced it — unless the caller explicitly opts
+    into cross-model machine reuse. Legacy machine records with unknown
+    provenance (provider None, e.g. pre-provenance databases) are
+    grandfathered as reusable so existing work keeps flowing.
+    """
+    if record.source in (TranslationSource.HUMAN.value, TranslationSource.IMPORTED.value):
+        return True
+    if record.source == TranslationSource.MACHINE.value:
+        if record.provider is None:
+            return True  # legacy rows predate provenance tracking
+        return allow_cross_model_machine or record.provider == current_identity
+    return False
 
 
 class _MemoryView:
-    """Translation memory: fingerprint -> previously stored translation."""
+    """Translation memory: fingerprint -> TMRecord (provenance-aware)."""
 
-    def __init__(self, candidates: dict[str, str]) -> None:
-        self._candidates = candidates
+    def __init__(self, candidates: dict[str, TMRecord | str]) -> None:
+        normalized: dict[str, TMRecord] = {}
+        for key, value in candidates.items():
+            normalized[key] = (
+                value if isinstance(value, TMRecord)
+                else TMRecord(text=value)  # legacy plain-text mapping
+            )
+        self._candidates = normalized
 
-    def lookup(self, entry: LocalizationEntry) -> str | None:
+    def lookup(self, entry: LocalizationEntry) -> TMRecord | None:
         return self._candidates.get(entry.fingerprint)
 
 
@@ -59,13 +99,20 @@ class RealTranslateStage:
         provider: TranslationProvider,
         *,
         cache=None,  # TranslationCache or SQLiteCache (duck-typed)
-        memory: dict[str, str] | None = None,  # fingerprint -> translation
+        memory: dict[str, TMRecord | str] | None = None,  # fingerprint -> record
         force: bool = False,
+        reuse_machine_tm: bool = False,
     ) -> None:
+        """Force semantics: ignore already-translated text, TM and cache
+        reads; the provider is called again and provenance is overwritten.
+        ``reuse_machine_tm`` permits cross-model reuse of machine TM
+        (default False: same provider:model or human/imported only).
+        """
         self.provider = provider
         self.cache = cache
         self.memory = _MemoryView(memory or {})
         self.force = force
+        self.reuse_machine_tm = reuse_machine_tm
 
     # -- pipeline protocol ------------------------------------------------
 
@@ -89,6 +136,9 @@ class RealTranslateStage:
         target_lang: str = "ar",
         progress=None,  # optional callable(done: int, total: int)
     ) -> TranslationStats:
+        # Obsolete entries vanished from source: never translate, never count,
+        # so progress and totals stay exact across repeated runs.
+        entries = [e for e in entries if e.status is not EntryStatus.OBSOLETE]
         stats = TranslationStats(total=len(entries))
         pending: list[LocalizationEntry] = []
         done = 0
@@ -97,6 +147,7 @@ class RealTranslateStage:
             if progress is not None:
                 progress(done, stats.total)
 
+        identity = self.provider.config.identity
         for entry in entries:
             if entry.translated_text and not self.force:
                 stats.already_translated += 1
@@ -104,18 +155,28 @@ class RealTranslateStage:
                 tick()
                 continue
 
-            # 1. translation memory (same fingerprint seen before)
-            tm_hit = self.memory.lookup(entry)
-            if tm_hit is not None:
-                entry.translated_text = tm_hit
-                entry.status = EntryStatus.TRANSLATED
-                stats.memory_hits += 1
-                done += 1
-                tick()
-                continue
+            # 1. translation memory (provenance-gated, skipped under force)
+            if not self.force:
+                tm_hit = self.memory.lookup(entry)
+                if tm_hit is not None and tm_reusable(
+                    tm_hit,
+                    current_identity=identity,
+                    allow_cross_model_machine=self.reuse_machine_tm,
+                ):
+                    entry.translated_text = tm_hit.text
+                    entry.translation_source = tm_hit.source
+                    entry.translation_provider = (
+                        tm_hit.provider.split(":")[0] if tm_hit.provider else None
+                    )
+                    entry.translation_model = tm_hit.model
+                    entry.status = EntryStatus.TRANSLATED
+                    stats.memory_hits += 1
+                    done += 1
+                    tick()
+                    continue
 
-            # 2. cache (provider+model+lang specific)
-            if self.cache is not None:
+            # 2. cache (provider+model+lang specific, skipped under force)
+            if self.cache is not None and not self.force:
                 record = self.cache.lookup(entry)
                 if record is not None and record.translated_text:
                     entry.translated_text = record.translated_text
@@ -167,11 +228,23 @@ class RealTranslateStage:
             try:
                 results = self.provider.translate_batch(requests)
                 stats.api_calls += 1
+                stats.fallback_calls += int(
+                    getattr(self.provider, "last_fallback_calls", 0) or 0
+                )
             except Exception as exc:  # provider errors already stage-tagged
                 stats.failed += len(chunk)
                 stats.errors.append(str(exc))
+                # Surface the first real cause instead of silently counting.
+                if stats.first_error is None:
+                    from almurrib.core.errors import ProviderError
+
+                    stats.first_error = str(exc)
+                    if isinstance(exc, ProviderError):
+                        stats.first_http_status = exc.http_status
+                        stats.first_provider_message = exc.provider_message
                 continue
 
+            returned_ids = {res.entry_id for res in results}
             for res in results:
                 entry = by_id.get(res.entry_id)
                 if entry is None:
@@ -186,12 +259,29 @@ class RealTranslateStage:
                 entry.status = (
                     EntryStatus.TRANSLATED if report.ok else EntryStatus.FLAGGED
                 )
+                entry.translation_provider = self.provider.config.provider
+                entry.translation_model = self.provider.config.model
+                entry.translation_source = TranslationSource.MACHINE.value
                 stats.api_translated += 1
-                if self.cache is not None:
+                if report.ok and self.cache is not None:
+                    # Broken translations are persisted as FLAGGED for review
+                    # but must never poison the cache as good translations.
                     self.cache.remember(entry, res.translated_text)
                 done += 1
                 if progress is not None:
                     progress(done, total)
+
+            # A partial batch must not silently drop entries: anything the
+            # provider did not return stays untranslated AND is counted.
+            for missing_id, missing_entry in by_id.items():
+                if missing_id not in returned_ids and not missing_entry.translated_text:
+                    stats.failed += 1
+                    stats.errors.append(
+                        f"provider did not return a translation for entry {missing_id}"
+                    )
+                    done += 1
+                    if progress is not None:
+                        progress(done, total)
 
 
 def make_provider_key(label: str) -> str:

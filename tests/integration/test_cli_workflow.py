@@ -61,3 +61,93 @@ def test_translate_without_api_key_fails_clearly(tmp_path, capsys, monkeypatch):
     err = capsys.readouterr().err
     assert "auth" in err
     assert "ALMURRIB_API_KEY" in err
+
+
+def test_translate_force_retranslates_everything(renpy_fixture_dir, tmp_path,
+                                                 capsys, monkeypatch):
+    """--force must actually reach the stage (regression: flag was dropped)."""
+    db_path = tmp_path / "w.db"
+    assert main(["extract", str(renpy_fixture_dir), "--db", str(db_path)]) == 0
+    monkeypatch.setattr("almurrib.cli.main._build_provider", lambda settings: FakeProvider())
+    assert main(["translate", "--db", str(db_path)]) == 0
+    capsys.readouterr()
+    assert main(["translate", "--db", str(db_path), "--force"]) == 0
+    out = capsys.readouterr().out
+    assert "force" in out
+    assert "api translations   : 11" in out  # all, incl. pre-translated
+
+
+def test_translate_scoped_to_game_dir(renpy_fixture_dir, tmp_path, capsys, monkeypatch):
+    import shutil
+
+    other = tmp_path / "othergame"
+    shutil.copytree(renpy_fixture_dir, other)
+    db_path = tmp_path / "w.db"
+    assert main(["extract", str(renpy_fixture_dir), "--db", str(db_path)]) == 0
+    assert main(["extract", str(other), "--db", str(db_path)]) == 0
+    monkeypatch.setattr("almurrib.cli.main._build_provider", lambda settings: FakeProvider())
+    capsys.readouterr()
+    assert main(["translate", "--db", str(db_path),
+                 "--game-dir", str(renpy_fixture_dir)]) == 0
+    out = capsys.readouterr().out
+    assert "entries       : 11" in out  # only this project's entries
+
+
+def test_clear_then_retranslate_cycle(renpy_fixture_dir, tmp_path, capsys,
+                                      monkeypatch):
+    """Clean slate for model comparison: clear -> fresh API run -> export."""
+    from almurrib.core.workflow import translate_entries
+    from almurrib.storage.database import Database
+    from almurrib.storage.repository import EntryRepository
+
+    db_path = tmp_path / "w.db"
+    assert main(["extract", str(renpy_fixture_dir), "--db", str(db_path)]) == 0
+    monkeypatch.setattr("almurrib.cli.main._build_provider", lambda settings: FakeProvider())
+    assert main(["translate", "--db", str(db_path)]) == 0
+    capsys.readouterr()
+
+    assert main(["clear", "--db", str(db_path),
+                 "--game-dir", str(renpy_fixture_dir)]) == 0
+    out = capsys.readouterr().out
+    assert "cleared 11 translation(s)" in out  # 10 fresh + 1 imported pair
+
+    with Database(db_path) as db:
+        repo = EntryRepository(db)
+        assert all(e.translated_text is None for e in repo.list())
+        # the pre-existing imported pair is current (not obsolete) -> cleared too
+        stats = translate_entries(repo.list(), db, FakeProvider())
+        assert stats.api_translated == 11  # everything goes to the provider
+
+
+def test_clear_refuses_unguarded_scope(tmp_path, capsys):
+    rc = main(["clear", "--db", str(tmp_path / "x.db")])
+    assert rc == 2
+    assert "specify --game-dir or --all" in capsys.readouterr().err
+
+
+def test_translate_total_failure_exit_code(tmp_path, capsys, monkeypatch):
+    from almurrib.core.errors import RateLimitError
+    from almurrib.providers.fake import FakeProvider as _Fake
+
+    class _Down(_Fake):
+        def translate_batch(self, requests):
+            raise RateLimitError("rate limit exceeded (HTTP 429)",
+                                 http_status=429,
+                                 provider_message="slow down")
+
+    db_path = tmp_path / "w.db"
+    from almurrib.cli.main import main as _main
+
+    # extract via a tiny inline game
+    game = tmp_path / "g"
+    (game / "game").mkdir(parents=True)
+    (game / "game" / "script.rpy").write_text(
+        'label start:\n    "Hello."\n', encoding="utf-8")
+    assert _main(["extract", str(game), "--db", str(db_path)]) == 0
+    monkeypatch.setattr("almurrib.cli.main._build_provider", lambda settings: _Down())
+    capsys.readouterr()
+    rc = _main(["translate", "--db", str(db_path)])
+    assert rc == 2  # nothing translated at all
+    err = capsys.readouterr().err
+    assert "HTTP Status: 429" in err
+    assert "Suggestion:" in err

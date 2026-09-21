@@ -7,11 +7,13 @@ translate it (locally first, cloud optional with BYO key), validate the
 result, process Arabic correctly (reshaping, BiDi, fonts), and put the
 translation back into the game.
 
-> **Status: Phase 1 complete.** The repository contains the full Ren'Py
+> **Status: Phase 1 stable.** The repository contains the hardened Ren'Py
 > localization pipeline: detection → extraction → normalized entries →
-> API translation (BYO key) → cache + translation memory → placeholder
-> validation → Ren'Py translation files. See
-> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and
+> provider-registry translation (BYO key, 20+ providers, model discovery)
+> → provenance-aware cache + translation memory → placeholder validation →
+> deduplicated Ren'Py translation files. See
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design,
+> [docs/PROVIDERS.md](docs/PROVIDERS.md) for the provider ecosystem, and
 > [docs/PHASE1_STATUS.md](docs/PHASE1_STATUS.md) for what is tested and
 > the honest limitations.
 
@@ -28,11 +30,21 @@ are integrated through adapters, never forked into the core.
 
 ```text
 Ren'Py game → detect → extract → normalize → translate (API, BYO key)
-            → cache + translation memory → placeholder validation
+            → provider/model cache + provenance-gated TM → placeholder validation
             → generate game/tl/<lang>/strings.rpy patch (originals untouched)
 ```
 
 Validated end-to-end on Ren'Py's official demo "The Question" (75 entries).
+
+## Providers
+
+Pick from 20+ definitions (OpenRouter, TokenRouter, Agent Router, OpenAI,
+Gemini, DeepSeek, Groq, Together, Fireworks, DeepInfra, Cerebras, SambaNova,
+Mistral, xAI, Cohere native, Hugging Face, Ollama / llama.cpp / vLLM / NIM
+local, …). The GUI offers a provider selector, **Test Connection**,
+**Fetch Models** (searchable model dropdown, manual id fallback) and a
+force-retranslation checkbox. See [docs/PROVIDERS.md](docs/PROVIDERS.md) for
+the verified compatibility matrix.
 
 ## Quick start
 
@@ -41,7 +53,7 @@ Validated end-to-end on Ren'Py's official demo "The Question" (75 entries).
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[dev]"
 
-# Desktop GUI (simple Tkinter frontend):
+# Desktop GUI (Tkinter frontend: provider selector, model discovery, logs):
 .\.venv\Scripts\almurrib-gui
 
 # Offline walkthrough on the bundled tiny fixture (no API key needed):
@@ -50,18 +62,25 @@ python -m venv .venv
 .\.venv\Scripts\almurrib inspect --db demo.db
 .\.venv\Scripts\almurrib db      --db demo.db
 
-# Full localization with a real API provider (Bring Your Own Key):
+# Full localization with a real AI provider (Bring Your Own Key):
 $env:ALMURRIB_API_KEY  = "..."                              # never committed
-$env:ALMURRIB_BASE_URL = "https://api.openai.com/v1"        # or OpenRouter/Gemini/Kimi/...
+$env:ALMURRIB_BASE_URL = "https://api.openai.com/v1"        # or any registry provider
 $env:ALMURRIB_MODEL    = "gpt-4o-mini"
-.\.venv\Scripts\almurrib localize <game_dir> --db demo.db --out patch\
+.\.venv\Scripts\almurrib localize <game_dir> --db demo.db --out patch\ `
+  --provider openai --model gpt-4o-mini
 # → patch\game\tl\arabic\strings.rpy, ready to drop into a copy of the game
+
+# Repeat safely: re-extract marks vanished lines obsolete (history kept),
+# re-translate reuses cache/TM with zero API calls, --force starts fresh:
+.\.venv\Scripts\almurrib translate --db demo.db --game-dir fixtures\renpy_tiny --force
 
 # Run the tests (offline; live API test is opt-in):
 .\.venv\Scripts\python -m pytest
 ```
 
 Copy `.env.example` to `.env` for persistent local configuration.
+When double-clicking the packaged EXE, `.env` / the default database /
+output live next to the executable (see [docs/GUI.md](docs/GUI.md)).
 
 ### Build the Windows app
 
@@ -75,16 +94,21 @@ See [docs/GUI.md](docs/GUI.md) for the GUI and executable details.
 
 ```text
 src/almurrib/
-  core/            normalized model, pipeline, cache, providers, placeholders,
-                   config, translation stage, workflow (engine-agnostic)
+  core/            normalized model (+provenance), pipeline, cache, providers,
+                   placeholders, config, translation stage, workflow,
+                   shared error reporting (engine-agnostic)
   engine_adapters/ engine-specific code (renpy/: parser, adapter, reinjection)
-  providers/       translation providers (openai_compat, fake) + factory
-  storage/         SQLite database + repository + persistent cache
-  cli/             command-line interface
+  providers/       registry + discovery + generic OpenAI transport + Cohere
+                   native adapter + fake (tests) + factory
+  storage/         SQLite database (migrations) + repository + persistent cache
+  cli/             command-line interface (force/scope/provider parity w/ GUI)
+  gui/             Tkinter frontend (provider/model discovery, logs, options)
 tests/
-  unit/            model, storage, cache, pipeline, parser, placeholders, ...
-  integration/     CLI workflow, fixture round-trip, real-game validation
-  live/            opt-in live API tests (ALMURRIB_RUN_LIVE_TESTS=1)
+  unit/            model, storage, cache, pipeline, parser, placeholders,
+                   providers, discovery, registry, reporting, ...
+  integration/     CLI workflow, repeated-run stability, fixture round-trip,
+                   real-game validation, GUI behavior
+  live/            opt-in live API + discovery tests (ALMURRIB_RUN_LIVE_TESTS=1)
 fixtures/
   renpy_tiny/      deterministic sample Ren'Py game
   the_question/    Ren'Py's official demo script (real-game validation)

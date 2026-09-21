@@ -13,7 +13,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Ordered migrations: (version, sql). Never edit applied entries; append new.
 MIGRATIONS: list[tuple[int, str]] = [
@@ -69,6 +69,20 @@ MIGRATIONS: list[tuple[int, str]] = [
             ON translation_cache (entry_fingerprint);
         """,
     ),
+    (
+        2,
+        """
+        -- Translation provenance (Phase 1 hardening): every stored
+        -- translation records WHERE it came from so machine output can never
+        -- silently masquerade as human-approved text.
+        ALTER TABLE localization_entries
+            ADD COLUMN translation_provider TEXT;
+        ALTER TABLE localization_entries
+            ADD COLUMN translation_model TEXT;
+        ALTER TABLE localization_entries
+            ADD COLUMN translation_source TEXT NOT NULL DEFAULT 'machine';
+        """,
+    ),
 ]
 
 
@@ -82,6 +96,13 @@ class Database:
         self._conn = sqlite3.connect(str(self.path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        # WAL keeps bulk upserts fast and readers non-blocking; it is a
+        # per-database file mode, fully portable SQLite (no extra deps).
+        # On :memory: this is a harmless no-op (stays 'memory').
+        try:
+            self._conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.Error:
+            pass
         self._migrate()
 
     @property
