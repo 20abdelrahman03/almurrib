@@ -1,0 +1,163 @@
+{
+  "cases": [
+    {
+      "deliberate": false,
+      "expected": {
+        "must_flag": [],
+        "passed": true
+      },
+      "id": "qa_name_ok_001",
+      "note": "Correct character name passes quietly",
+      "source": "Hi Sylvie!",
+      "target_lang": "ar",
+      "translation": "أهلا سيلفي!"
+    },
+    {
+      "deliberate": false,
+      "expected": {
+        "must_flag": [],
+        "passed": true
+      },
+      "id": "qa_term_ok_002",
+      "note": "Correct terminology passes quietly",
+      "source": "Open the visual novel.",
+      "target_lang": "ar",
+      "translation": "افتح الرواية المرئية."
+    },
+    {
+      "deliberate": true,
+      "expected": {
+        "must_flag": [
+          "glossary.forbidden"
+        ],
+        "passed": false
+      },
+      "id": "qa_bad_name_003",
+      "note": "SUPPOSED TO FAIL: forbidden variant سيلفيا (also tests prefix-substring subtlety)",
+      "source": "Hi Sylvie!",
+      "target_lang": "ar",
+      "translation": "أهلا سيلفيا!"
+    },
+    {
+      "deliberate": true,
+      "expected": {
+        "must_flag": [
+          "glossary.forbidden"
+        ],
+        "passed": false
+      },
+      "id": "qa_forbidden_004",
+      "note": "SUPPOSED TO FAIL: forbidden variant المحطه",
+      "source": "Welcome to Station 7.",
+      "target_lang": "ar",
+      "translation": "أهلا بك في المحطه 7."
+    },
+    {
+      "deliberate": true,
+      "expected": {
+        "must_flag": [
+          "source_copied"
+        ],
+        "passed": false
+      },
+      "id": "qa_source_copy_005",
+      "note": "SUPPOSED TO FAIL: English left unchanged",
+      "source": "Good evening.",
+      "target_lang": "ar",
+      "translation": "Good evening."
+    },
+    {
+      "deliberate": true,
+      "expected": {
+        "must_flag": [
+          "suspicious_latin"
+        ],
+        "passed": true
+      },
+      "id": "qa_suspicious_latin_006",
+      "note": "SUPPOSED TO FLAG (warning): too much English left",
+      "source": "Welcome home.",
+      "target_lang": "ar",
+      "translation": "أهلا Welcome يا صديقي home"
+    },
+    {
+      "deliberate": false,
+      "expected": {
+        "must_flag": [],
+        "passed": true
+      },
+      "id": "qa_legit_latin_007",
+      "note": "OpenAI/Qwen3/API/FPS are legitimate, must not flag",
+      "source": "Benchmark OpenAI and Qwen3 via API at 60 FPS.",
+      "target_lang": "ar",
+      "translation": "قارن OpenAI و Qwen3 عبر API بسرعة 60 FPS."
+    },
+    {
+      "deliberate": true,
+      "expected": {
+        "must_flag": [
+          "placeholder_missing"
+        ],
+        "passed": false
+      },
+      "id": "qa_placeholder_missing_008",
+      "note": "SUPPOSED TO FAIL: {player_name} dropped",
+      "source": "Hello {player_name}!",
+      "target_lang": "ar",
+      "translation": "أهلا!"
+    },
+    {
+      "deliberate": false,
+      "expected": {
+        "must_flag": [],
+        "passed": true
+      },
+      "id": "qa_placeholder_kept_009",
+      "note": "{player_name} preserved exactly",
+      "source": "Hello {player_name}!",
+      "target_lang": "ar",
+      "translation": "أهلا {player_name}!"
+    },
+    {
+      "deliberate": true,
+      "expected": {
+        "must_flag": [
+          "excessive_length"
+        ],
+        "passed": true
+      },
+      "id": "qa_bloated_010",
+      "note": "SUPPOSED TO FLAG (warning): bloated translation",
+      "source": "Hi.",
+      "target_lang": "ar",
+      "translation": "أهلا وسهلا بك يا صديقي العزيز في هذه المحطة الجميلة جدا جدا جدا"
+    },
+    {
+      "deliberate": true,
+      "expected": {
+        "must_flag": [
+          "english_punctuation"
+        ],
+        "passed": true
+      },
+      "id": "qa_punct_011",
+      "note": "SUPPOSED TO FLAG (warning): English comma in Arabic",
+      "source": "Hello, friend.",
+      "target_lang": "ar",
+      "translation": "مرحبا, يا صديقي."
+    },
+    {
+      "deliberate": false,
+      "expected": {
+        "must_flag": [],
+        "passed": true
+      },
+      "id": "qa_arabic_punct_012",
+      "note": "Arabic punctuation passes",
+      "source": "Hello, friend.",
+      "target_lang": "ar",
+      "translation": "مرحبا، يا صديقي؟"
+    }
+  ],
+  "version": 1
+}

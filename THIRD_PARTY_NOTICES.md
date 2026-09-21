@@ -4,8 +4,28 @@
 
 ## Runtime
 
-The Phase 1 foundation has **no third-party runtime dependencies** — it
-uses only the Python standard library (CPython, PSF License).
+Phase 1 was stdlib-only. Phase 2 adds exactly two small Unicode libraries
+for the Arabic layer (pinned in `pyproject.toml`, no transitive
+dependencies):
+
+| Package | Version | License | Purpose |
+|---|---|---|---|
+| `arabic-reshaper` | 3.0.1 | MIT | Arabic presentation-form shaping (harakat preserved via explicit config) |
+| `python-bidi` | 0.6.11 | LGPL-3.0 | Unicode Bidirectional Algorithm (visual order for legacy renderers) |
+| `fontTools` | 4.65.0 | MIT | Font advance-width measurement for metric-aware wrapping (pure Python) |
+
+## Optional extras (not installed by default)
+
+| Package | Version | License | Purpose |
+|---|---|---|---|
+| `UnityPy` | 1.25.3 | MIT (K0lb3) | Unity asset parsing for the Unity adapter. Ships INSIDE `dist\Almurrib.exe` (with lz4/brotli/Pillow) so one-click Unity works with zero installs; source installs use the `almurrib[unity]` extra. Detection works without it. |
+| `argostranslate` | 1.11.0 | MIT (Argos Open Tech) | Offline NMT for the Argos provider (`almurrib[offline]`). Heavy transitive stack (torch ~450MB, ctranslate2, stanza) stays out of the default install and EXE. Models (e.g. en→ar, ~88MB) download on explicit user command, never bundled. |
+
+LGPL-3.0 is compatible with this project's AGPL-3.0-only license for
+combined works. `python-bidi` 0.6.x ships a compiled Rust helper
+(`bidi.cp312-win_amd64.pyd`); PyInstaller bundles it automatically
+(verified in `dist\Almurrib.exe`). Everything else remains stdlib-only
+(CPython, PSF License).
 
 ## Test fixtures
 

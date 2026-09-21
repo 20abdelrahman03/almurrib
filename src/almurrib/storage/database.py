@@ -13,7 +13,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 # Ordered migrations: (version, sql). Never edit applied entries; append new.
 MIGRATIONS: list[tuple[int, str]] = [
@@ -81,6 +81,95 @@ MIGRATIONS: list[tuple[int, str]] = [
             ADD COLUMN translation_model TEXT;
         ALTER TABLE localization_entries
             ADD COLUMN translation_source TEXT NOT NULL DEFAULT 'machine';
+        """,
+    ),
+    (
+        3,
+        """
+        -- Project/global terminology (Phase 2b): project_id 0 = shared.
+        CREATE TABLE IF NOT EXISTS glossary_entries (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id       INTEGER NOT NULL DEFAULT 0,
+            source_term      TEXT NOT NULL,
+            target_term      TEXT NOT NULL,
+            type             TEXT NOT NULL DEFAULT 'term',
+            gender           TEXT,
+            style            TEXT,
+            pronunciation    TEXT,
+            notes            TEXT,
+            aliases_json     TEXT NOT NULL DEFAULT '[]',
+            forbidden_json   TEXT NOT NULL DEFAULT '[]',
+            enabled          INTEGER NOT NULL DEFAULT 1,
+            updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_glossary_term
+            ON glossary_entries (project_id, source_term);
+        CREATE INDEX IF NOT EXISTS idx_glossary_project
+            ON glossary_entries (project_id);
+        """,
+    ),
+    (
+        4,
+        """
+        -- Entry identity is (project_id, id), not id alone: two different
+        -- games can hold the identical relative path + line + text (same
+        -- content hash). Sharing one row across projects corrupted project
+        -- scoping (counts, lists, translations leaking between games).
+        -- SQLite cannot alter a PK in place, so rebuild the table.
+        CREATE TABLE localization_entries_new (
+            id               TEXT NOT NULL,       -- deterministic content hash
+            project_id       INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            engine           TEXT NOT NULL,
+            source_text      TEXT NOT NULL,
+            translated_text  TEXT,
+            speaker          TEXT,
+            context          TEXT,
+            status           TEXT NOT NULL DEFAULT 'untranslated',
+            fingerprint      TEXT NOT NULL,
+            source_refs_json TEXT NOT NULL,
+            tags_json        TEXT NOT NULL DEFAULT '[]',
+            qa_flags_json    TEXT NOT NULL DEFAULT '[]',
+            metadata_json    TEXT NOT NULL DEFAULT '{}',
+            model_version    INTEGER NOT NULL DEFAULT 1,
+            translation_provider TEXT,
+            translation_model TEXT,
+            translation_source TEXT NOT NULL DEFAULT 'machine',
+            updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (project_id, id)
+        );
+
+        -- Pre-v4 duplicates (same id, several projects): keep the earliest
+        -- stored row deterministically, drop the shadows. Explicit column
+        -- lists: v2 appended provenance columns AFTER updated_at, so
+        -- positional SELECT * would misalign.
+        INSERT INTO localization_entries_new (
+            id, project_id, engine, source_text, translated_text, speaker,
+            context, status, fingerprint, source_refs_json, tags_json,
+            qa_flags_json, metadata_json, model_version,
+            translation_provider, translation_model, translation_source,
+            updated_at
+        )
+            SELECT
+                id, project_id, engine, source_text, translated_text, speaker,
+                context, status, fingerprint, source_refs_json, tags_json,
+                qa_flags_json, metadata_json, model_version,
+                translation_provider, translation_model, translation_source,
+                updated_at
+            FROM localization_entries
+            WHERE rowid IN (
+                SELECT MIN(rowid) FROM localization_entries GROUP BY id
+            );
+
+        DROP TABLE localization_entries;
+        ALTER TABLE localization_entries_new RENAME TO localization_entries;
+
+        CREATE INDEX idx_entries_project
+            ON localization_entries (project_id);
+        CREATE INDEX idx_entries_fingerprint
+            ON localization_entries (fingerprint);
+        CREATE INDEX idx_entries_status
+            ON localization_entries (status);
         """,
     ),
 ]

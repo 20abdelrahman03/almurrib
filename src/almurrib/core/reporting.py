@@ -44,8 +44,11 @@ def format_translation_summary(stats) -> str:
     ]
     if getattr(stats, "fallback_calls", 0):
         parts.append(f"fallback={stats.fallback_calls}")
-    if stats.placeholder_failures:
-        parts.append(f"flagged={stats.placeholder_failures}")
+    flagged = stats.placeholder_failures + getattr(stats, "arabic_errors", 0)
+    if flagged:
+        parts.append(f"flagged={flagged}")
+    if getattr(stats, "glossary_flags", 0):
+        parts.append(f"glossary={stats.glossary_flags}")
     return " ".join(parts) + ")"
 
 

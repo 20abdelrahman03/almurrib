@@ -108,6 +108,35 @@ def _build_parser() -> argparse.ArgumentParser:
     p_clear.add_argument("--all", action="store_true",
                          help="clear every project in the database")
 
+    p_gloss = sub.add_parser(
+        "glossary", help="manage project/global terminology (list/add/import/export/clear)"
+    )
+    p_gloss.add_argument("action",
+                         choices=["list", "add", "import", "export", "clear"])
+    p_gloss.add_argument("--db", type=Path, default=DEFAULT_DB)
+    p_gloss.add_argument("--game-dir", type=Path, default=None,
+                         help="project scope (default: global entries)")
+    p_gloss.add_argument("--file", type=Path, default=None,
+                         help="JSON/CSV file for import/export")
+    p_gloss.add_argument("--source", type=str, default=None)
+    p_gloss.add_argument("--target", type=str, default=None)
+    p_gloss.add_argument("--type", type=str, default="term",
+                         choices=["term", "character"])
+    p_gloss.add_argument("--gender", type=str, default=None)
+    p_gloss.add_argument("--style", type=str, default=None)
+
+    p_local = sub.add_parser(
+        "local-models",
+        help="manage offline translation models (Argos, no key needed)",
+    )
+    p_local.add_argument("action", choices=["list", "install"])
+    p_local.add_argument("--pair", type=str, default="en_ar",
+                         help="language pair id, e.g. en_ar")
+
+    from almurrib.cli.unity import register_unity
+
+    register_unity(sub)
+
     return parser
 
 
@@ -223,6 +252,12 @@ def _print_stats(stats, *, secrets: list | None = None) -> None:
     print(f"  api translations   : {stats.api_translated}")
     if stats.placeholder_failures:
         print(f"  placeholder issues : {stats.placeholder_failures} (flagged)")
+    if getattr(stats, "arabic_errors", 0):
+        print(f"  arabic qa errors   : {stats.arabic_errors} (flagged)")
+    if getattr(stats, "arabic_flags", 0):
+        print(f"  arabic qa flags    : {stats.arabic_flags}")
+    if getattr(stats, "glossary_flags", 0):
+        print(f"  glossary qa flags  : {stats.glossary_flags}")
     if stats.failed:
         print(f"  failed             : {stats.failed}")
         for err in stats.errors[:3]:
@@ -375,6 +410,157 @@ def _cmd_clear(args: argparse.Namespace) -> int:
     return 0
 
 
+def _glossary_project_id(db, args) -> int:
+    """Resolve glossary scope: game project or global (0)."""
+    from almurrib.core.glossary import GLOBAL_PROJECT_ID
+    from almurrib.core.workflow import resolve_project
+
+    if getattr(args, "game_dir", None) is None:
+        return GLOBAL_PROJECT_ID
+    project = resolve_project(db, args.game_dir)
+    if project is None:
+        print("(no stored project for this game dir — using global scope)")
+        return GLOBAL_PROJECT_ID
+    return project.id
+
+
+def _cmd_glossary(args: argparse.Namespace) -> int:
+    from almurrib.core.glossary import (
+        GLOBAL_PROJECT_ID,
+        GlossaryEntry,
+        export_csv,
+        export_json,
+        import_csv,
+        import_json,
+    )
+    from almurrib.storage.glossary import GlossaryRepository
+
+    with Database(args.db) as db:
+        repo = GlossaryRepository(db)
+        action = args.action
+        if action == "list":
+            project_id = _glossary_project_id(db, args)
+            # Effective glossary: project + global rows, scope-tagged.
+            entries = repo.list(project_id)
+            scope = "global" if project_id == GLOBAL_PROJECT_ID else f"project {project_id}"
+            if not entries:
+                print(f"(no glossary entries in {scope} scope)")
+                return 0
+            for entry in entries:
+                scope_tag = "global" if entry.project_id == GLOBAL_PROJECT_ID else "project"
+                state = "" if entry.enabled else " [disabled]"
+                print(f"{entry.source_term} -> {entry.target_term}"
+                      f"  [{entry.type},{scope_tag}]{state}")
+            return 0
+        if action == "add":
+            if not args.source or not args.target:
+                print("error: add needs --source and --target", file=sys.stderr)
+                return 2
+            project_id = _glossary_project_id(db, args)
+            try:
+                repo.add(GlossaryEntry(
+                    source_term=args.source, target_term=args.target,
+                    type=args.type, gender=args.gender, style=args.style,
+                    project_id=project_id,
+                ))
+            except Exception as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            print(f"added '{args.source}' -> '{args.target}'")
+            return 0
+        if action in ("import", "export"):
+            if args.file is None:
+                print("error: import/export needs --file", file=sys.stderr)
+                return 2
+            project_id = _glossary_project_id(db, args)
+            suffix = args.file.suffix.lower()
+            try:
+                if action == "import":
+                    text = args.file.read_text(encoding="utf-8")
+                    loader = import_json if suffix == ".json" else import_csv
+                    glossary, skipped = loader(text, project_id=project_id)
+                    added, conflicts = repo.add_many(glossary)
+                    print(f"imported {added} entr(y/ies), skipped {len(skipped)}")
+                    for skip in skipped + [
+                            {"term": s["term"], "reason": s["reason"]}
+                            for s in conflicts]:
+                        print(f"  ! {skip['term']}: {skip['reason']}")
+                    return 0
+                from almurrib.core.glossary import Glossary
+
+                entries = [e for e in repo.list(project_id)
+                           if e.project_id == project_id]
+                glossary = Glossary(entries)
+                text = export_json(glossary) if suffix == ".json" else export_csv(glossary)
+                args.file.write_text(text, encoding="utf-8")
+                print(f"exported {len(entries)} entr(y/ies) to {args.file}")
+                return 0
+            except (ValueError, OSError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+        if action == "clear":
+            project_id = _glossary_project_id(db, args)
+            count = repo.clear(project_id)  # scoped: global clears only global
+            print(f"cleared {count} glossary entr(y/ies)")
+            return 0
+    return 0  # unreachable
+
+
+def _cmd_unity(args: argparse.Namespace) -> int:
+    from almurrib.cli.unity import cmd_unity
+
+    return cmd_unity(args)
+
+
+def _cmd_local_models(args: argparse.Namespace) -> int:
+    """List or install offline Argos models (explicit downloads only)."""
+    try:
+        from almurrib.providers.argos import installed_models
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.action == "list":
+        try:
+            models = installed_models()
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if not models:
+            print("(no offline models installed)")
+            print("install one with: almurrib local-models install --pair en_ar")
+            return 0
+        for model in models:
+            print(f"{model.id}  {model.display_name or ''}")
+        return 0
+    # install: fetch the .argosmodel from the public index, then install.
+    pair = (args.pair or "en_ar").strip().lower().replace("-", "_")
+    if "_" not in pair:
+        print("error: --pair must look like en_ar", file=sys.stderr)
+        return 2
+    from_code, _, to_code = pair.partition("_")
+    try:
+        import argostranslate.package as package
+
+        package.update_package_index()
+        available = package.get_available_packages()
+        candidates = [p for p in available
+                      if getattr(p, "from_code", "") == from_code
+                      and getattr(p, "to_code", "") == to_code]
+        if not candidates:
+            print(f"error: no downloadable model for pair '{pair}'",
+                  file=sys.stderr)
+            return 2
+        picked = candidates[0]
+        print(f"downloading {pair} (~90MB, one-time)...")
+        path = picked.download()
+        package.install_from_path(path)
+        print(f"installed {pair}")
+        return 0
+    except Exception as exc:
+        print(f"error: model install failed: {exc}", file=sys.stderr)
+        return 2
+
+
 _COMMANDS = {
     "detect": _cmd_detect,
     "extract": _cmd_extract,
@@ -384,6 +570,9 @@ _COMMANDS = {
     "export": _cmd_export,
     "localize": _cmd_localize,
     "clear": _cmd_clear,
+    "glossary": _cmd_glossary,
+    "local-models": _cmd_local_models,
+    "unity": _cmd_unity,
 }
 
 
@@ -403,6 +592,15 @@ def main(argv: list[str] | None = None) -> int:
         return handler(args)
     except AlMurribError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        # Misplaced-folder guidance for detection failures (one place,
+        # every command benefits).
+        game_dir = getattr(args, "game_dir", None)
+        if game_dir is not None:
+            from almurrib.engine_adapters.registry import misplaced_dir_hint
+
+            hint = misplaced_dir_hint(game_dir)
+            if hint is not None:
+                print(f"hint: {hint}", file=sys.stderr)
         return 2
 
 

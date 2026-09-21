@@ -345,6 +345,48 @@ def test_discovery_strategy_resolution():
         OFFICIAL_API, STATIC_FALLBACK]
 
 
+def test_empty_official_list_falls_through():
+    def fake(req, timeout=0):
+        if req.full_url.endswith("/models"):
+            return _Resp(json.dumps({"data": []}).encode())
+        return _Resp(json.dumps(
+            {"object": "list", "has_more": False,
+             "data": [{"id": "m", "mode": "chat"}]}).encode())
+
+    import urllib.request
+
+    orig = urllib.request.urlopen
+    urllib.request.urlopen = fake
+    try:
+        result = refresh_models(get_definition("openai"), api_key="k",
+                                base_url="https://api.openai.com/v1")
+    finally:
+        urllib.request.urlopen = orig
+    assert result.source == SOURCE_LITELLM
+    assert [m.id for m in result.models] == ["m"]
+    assert result.error is not None  # empty official kept visible
+
+
+def test_catalog_http_errors_mapped(monkeypatch):
+    from almurrib.core.errors import AuthenticationError, ProviderError
+    from almurrib.providers import catalog as catalog_module
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda req, timeout=0: (_ for _ in ()).throw(
+            _http_error(req.full_url, 401, {"error": {"message": "no"}})))
+    with pytest.raises(AuthenticationError):
+        catalog_module._get_json("https://x.test/cat", timeout_seconds=5)
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda req, timeout=0: (_ for _ in ()).throw(
+            _http_error(req.full_url, 500, {"oops": 1})))
+    with pytest.raises(ProviderError) as exc_info:
+        catalog_module._get_json("https://x.test/cat", timeout_seconds=5)
+    assert exc_info.value.http_status == 500
+
+
 # -- RefreshResult shape -------------------------------------------------------------
 
 def test_refresh_result_defaults():

@@ -20,7 +20,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from almurrib.core.cache import DEFAULT_PROVIDER, make_cache_key
+
+from almurrib.core.glossary import Glossary, build_translation_context
 from almurrib.core.model import EntryStatus, LocalizationEntry, TranslationSource
 from almurrib.core.placeholders import extract_placeholders, validate_translation
 from almurrib.core.provider import TranslationProvider, TranslationRequest
@@ -36,6 +37,9 @@ class TranslationStats:
     fallback_calls: int = 0  # individual requests after a malformed batch
     api_translated: int = 0
     placeholder_failures: int = 0
+    arabic_errors: int = 0  # entries FLAGGED by Arabic QA (non-placeholder)
+    arabic_flags: int = 0  # total Arabic QA flags appended (any severity)
+    glossary_flags: int = 0  # glossary QA flags appended (any severity)
     failed: int = 0
     errors: list[str] = field(default_factory=list)
     first_error: str | None = None  # the first provider failure cause
@@ -102,17 +106,21 @@ class RealTranslateStage:
         memory: dict[str, TMRecord | str] | None = None,  # fingerprint -> record
         force: bool = False,
         reuse_machine_tm: bool = False,
+        glossary: Glossary | None = None,
     ) -> None:
         """Force semantics: ignore already-translated text, TM and cache
         reads; the provider is called again and provenance is overwritten.
         ``reuse_machine_tm`` permits cross-model reuse of machine TM
         (default False: same provider:model or human/imported only).
+        ``glossary`` guides providers via prompt context and enforces
+        terminology through QA (never by blind post-replacement).
         """
         self.provider = provider
         self.cache = cache
         self.memory = _MemoryView(memory or {})
         self.force = force
         self.reuse_machine_tm = reuse_machine_tm
+        self.glossary = glossary
 
     # -- pipeline protocol ------------------------------------------------
 
@@ -151,6 +159,10 @@ class RealTranslateStage:
         for entry in entries:
             if entry.translated_text and not self.force:
                 stats.already_translated += 1
+                # Recomputed deterministically so flags always describe the
+                # current text (self-healing across runs and rule updates).
+                self._apply_qa(entry, entry.translated_text,
+                               target_lang=target_lang, stats=stats, reset=False)
                 done += 1
                 tick()
                 continue
@@ -162,7 +174,7 @@ class RealTranslateStage:
                     tm_hit,
                     current_identity=identity,
                     allow_cross_model_machine=self.reuse_machine_tm,
-                ):
+                ) and not self._glossary_veto(entry, tm_hit.text):
                     entry.translated_text = tm_hit.text
                     entry.translation_source = tm_hit.source
                     entry.translation_provider = (
@@ -170,6 +182,8 @@ class RealTranslateStage:
                     )
                     entry.translation_model = tm_hit.model
                     entry.status = EntryStatus.TRANSLATED
+                    self._apply_qa(entry, tm_hit.text,
+                                   target_lang=target_lang, stats=stats, reset=False)
                     stats.memory_hits += 1
                     done += 1
                     tick()
@@ -178,9 +192,12 @@ class RealTranslateStage:
             # 2. cache (provider+model+lang specific, skipped under force)
             if self.cache is not None and not self.force:
                 record = self.cache.lookup(entry)
-                if record is not None and record.translated_text:
+                if (record is not None and record.translated_text
+                        and not self._glossary_veto(entry, record.translated_text)):
                     entry.translated_text = record.translated_text
                     entry.status = EntryStatus.TRANSLATED
+                    self._apply_qa(entry, record.translated_text,
+                                   target_lang=target_lang, stats=stats, reset=False)
                     stats.cache_hits += 1
                     done += 1
                     tick()
@@ -197,6 +214,91 @@ class RealTranslateStage:
 
         return stats
 
+    # Machine states QA themselves; human REVIEWED/APPROVED states are
+    # sacred and never touched by automatic QA.
+    _QAABLE_STATES = (EntryStatus.UNTRANSLATED, EntryStatus.TRANSLATED,
+                      EntryStatus.FLAGGED)
+
+    def _glossary_veto(self, entry: LocalizationEntry, text: str) -> bool:
+        """True when the current glossary rejects a TM/cache candidate.
+
+        Fine-grained invalidation: only entries whose cached text violates
+        the ACTIVE glossary fall through to the provider; unrelated entries
+        keep their hits. No glossary (or no matches) never vetoes.
+        """
+        if self.glossary is None:
+            return False
+        from almurrib.core.glossary import glossary_qa_check
+
+        matches = self.glossary.lookup(entry.source_text)
+        if not matches:
+            return False
+        # Any glossary finding (error OR warning) vetoes the hit: a stale
+        # cached text that no longer satisfies the active glossary must be
+        # retranslated, not quietly reused.
+        return any(f.rule_id.startswith("glossary.")
+                   for f in glossary_qa_check(entry.source_text, text, matches))
+
+    def _apply_qa(self, entry: LocalizationEntry, text: str, *,
+                  target_lang: str, stats: TranslationStats,
+                  reset: bool) -> bool:
+        """(Re)compute QA flags for machine-state text. Returns has-errors.
+
+        ``reset`` drops existing flags first (fresh API translation).
+        Otherwise new tokens merge without duplicating (stable re-runs).
+        An error upgrades TRANSLATED to FLAGGED; nothing else moves status.
+        """
+        if entry.status not in self._QAABLE_STATES:
+            return False
+        from almurrib.arabic.qa import arabic_qa_check
+        from almurrib.core.glossary import glossary_qa_check
+
+        if reset:
+            entry.qa_flags = []
+        fresh = arabic_qa_check(entry.source_text, text,
+                                target_lang=target_lang, entry_id=entry.id)
+        glossary_flags: list = []
+        if self.glossary is not None:
+            matches = self.glossary.lookup(entry.source_text)
+            glossary_flags = glossary_qa_check(
+                entry.source_text, text, matches)
+            fresh.flags.extend(glossary_flags)
+        new_tokens = [f.storage_token() for f in fresh.flags
+                      if f.storage_token() not in entry.qa_flags]
+        entry.qa_flags.extend(new_tokens)
+        new_glossary = sum(
+            1 for f in glossary_flags
+            if f.storage_token() in new_tokens)
+        stats.glossary_flags += new_glossary
+        stats.arabic_flags += len(new_tokens) - new_glossary
+        errors = [f for f in fresh.flags if f.severity == "error"]
+        if errors:
+            if any(f.rule_id == "placeholder_missing" for f in errors):
+                stats.placeholder_failures += 1
+            if any(f.rule_id != "placeholder_missing"
+                   and not f.rule_id.startswith("glossary.") for f in errors):
+                stats.arabic_errors += 1
+            if entry.status is EntryStatus.TRANSLATED:
+                entry.status = EntryStatus.FLAGGED
+        return bool(errors)
+
+    def _build_request(self, entry: LocalizationEntry, source_lang: str,
+                       target_lang: str) -> TranslationRequest:
+        """One provider request enriched with glossary/speaker context."""
+        context = build_translation_context(entry, self.glossary)
+        return TranslationRequest(
+            entry_id=entry.id,
+            source_text=entry.source_text,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            speaker=entry.speaker,
+            context=entry.context,
+            placeholders=extract_placeholders(entry.source_text),
+            speaker_gender=context.speaker_gender,
+            speaker_style=context.speaker_style,
+            glossary_terms=context.glossary_terms,
+        )
+
     def _translate_pending(
         self,
         entries: list[LocalizationEntry],
@@ -212,18 +314,8 @@ class RealTranslateStage:
         done = done_offset
         for start in range(0, len(entries), batch_size):
             chunk = entries[start : start + batch_size]
-            requests = [
-                TranslationRequest(
-                    entry_id=e.id,
-                    source_text=e.source_text,
-                    source_lang=source_lang,
-                    target_lang=target_lang,
-                    speaker=e.speaker,
-                    context=e.context,
-                    placeholders=extract_placeholders(e.source_text),
-                )
-                for e in chunk
-            ]
+            requests = [self._build_request(e, source_lang, target_lang)
+                        for e in chunk]
             by_id = {e.id: e for e in chunk}
             try:
                 results = self.provider.translate_batch(requests)
@@ -249,16 +341,18 @@ class RealTranslateStage:
                 entry = by_id.get(res.entry_id)
                 if entry is None:
                     continue
-                report = validate_translation(entry.source_text, res.translated_text)
-                if not report.ok:
-                    stats.placeholder_failures += 1
-                    entry.qa_flags.append(
-                        "placeholder_missing:" + ",".join(report.missing)
-                    )
-                entry.translated_text = res.translated_text
-                entry.status = (
-                    EntryStatus.TRANSLATED if report.ok else EntryStatus.FLAGGED
-                )
+                # Canonical stored text: NFC-normalized (lossless), never
+                # shaped/reordered — render-ready forms derive on demand.
+                from almurrib.arabic.normalize import normalize_text
+
+                text = normalize_text(res.translated_text)
+                report = validate_translation(entry.source_text, text)
+                entry.translated_text = text
+                entry.status = EntryStatus.TRANSLATED
+                has_errors = self._apply_qa(
+                    entry, text, target_lang=target_lang, stats=stats, reset=True)
+                if not report.ok or has_errors:
+                    entry.status = EntryStatus.FLAGGED
                 entry.translation_provider = self.provider.config.provider
                 entry.translation_model = self.provider.config.model
                 entry.translation_source = TranslationSource.MACHINE.value
@@ -266,7 +360,9 @@ class RealTranslateStage:
                 if report.ok and self.cache is not None:
                     # Broken translations are persisted as FLAGGED for review
                     # but must never poison the cache as good translations.
-                    self.cache.remember(entry, res.translated_text)
+                    # Cache the NORMALIZED text: it must equal what the entry
+                    # (and later cache hits) carry, or runs diverge.
+                    self.cache.remember(entry, text)
                 done += 1
                 if progress is not None:
                     progress(done, total)
@@ -282,12 +378,3 @@ class RealTranslateStage:
                     done += 1
                     if progress is not None:
                         progress(done, total)
-
-
-def make_provider_key(label: str) -> str:
-    """Helper for callers building caches manually."""
-    return label or DEFAULT_PROVIDER
-
-
-def cache_key_for(entry: LocalizationEntry, *, target_lang: str, provider_label: str) -> str:
-    return make_cache_key(entry, target_lang=target_lang, provider=provider_label)

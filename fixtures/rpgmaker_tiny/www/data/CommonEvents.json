@@ -1,0 +1,1 @@
+[null, {"id": 1, "name": "Village Elder", "note": "", "switchId": 1, "trigger": 0, "list": [{"code": 101, "indent": 0, "parameters": ["", 0, 0, 2]}, {"code": 401, "indent": 0, "parameters": ["The night shift never ends here."]}, {"code": 102, "indent": 0, "parameters": [["Listen", "Leave"], 0, 0, 2, 0]}, {"code": 0, "indent": 0, "parameters": []}]}]

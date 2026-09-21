@@ -125,6 +125,39 @@ def test_clear_refuses_unguarded_scope(tmp_path, capsys):
     assert "specify --game-dir or --all" in capsys.readouterr().err
 
 
+def test_glossary_cli_crud_and_import(tmp_path, capsys):
+    db_path = tmp_path / "g.db"
+    assert main(["glossary", "add", "--db", str(db_path),
+                 "--source", "Sylvie", "--target", "سيلفي",
+                 "--type", "character", "--gender", "female"]) == 0
+    assert main(["glossary", "list", "--db", str(db_path)]) == 0
+    out = capsys.readouterr().out
+    assert "Sylvie -> سيلفي" in out and "character" in out
+
+    # conflict refused
+    rc = main(["glossary", "add", "--db", str(db_path),
+               "--source", "sylvie", "--target", "غير"])
+    assert rc == 2
+
+    # JSON round trip through files
+    export = tmp_path / "gloss.json"
+    assert main(["glossary", "export", "--db", str(db_path),
+                 "--file", str(export)]) == 0
+    assert main(["glossary", "clear", "--db", str(db_path)]) == 0
+    assert main(["glossary", "import", "--db", str(db_path),
+                 "--file", str(export)]) == 0
+    capsys.readouterr()
+    assert main(["glossary", "list", "--db", str(db_path)]) == 0
+    assert "Sylvie -> سيلفي" in capsys.readouterr().out
+
+    # missing file / bad scope guarded
+    assert main(["glossary", "import", "--db", str(db_path)]) == 2
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"nope": true}', encoding="utf-8")
+    assert main(["glossary", "import", "--db", str(db_path),
+                 "--file", str(bad)]) == 2
+
+
 def test_translate_total_failure_exit_code(tmp_path, capsys, monkeypatch):
     from almurrib.core.errors import RateLimitError
     from almurrib.providers.fake import FakeProvider as _Fake

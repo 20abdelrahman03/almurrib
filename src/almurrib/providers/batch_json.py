@@ -14,6 +14,29 @@ from almurrib.core.errors import InvalidResponseError
 from almurrib.core.provider import TranslationRequest, TranslationResult
 
 
+def batch_or_fallback(post_all, post_one, parse, requests):
+    """One policy for every chat provider: try the whole batch; on a
+    malformed batch response, degrade to individual requests so one bad
+    batch never loses entries that translate fine alone.
+
+    ``post_all()`` sends the batch, ``post_one(req)`` a single request,
+    ``parse(reply, reqs)`` interprets replies. Returns
+    ``(results, fallback_calls)``. A single request that fails still raises.
+    """
+    try:
+        return parse(post_all(), requests), 0
+    except InvalidResponseError:
+        if len(requests) <= 1:
+            raise
+        results: list[TranslationResult] = []
+        fallback_calls = 0
+        for req in requests:
+            reply = post_one(req)
+            fallback_calls += 1
+            results.extend(parse(reply, [req]))
+        return results, fallback_calls
+
+
 def parse_id_mapping(
     content: str,
     requests: list[TranslationRequest],

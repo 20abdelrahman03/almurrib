@@ -57,6 +57,7 @@ def test_gui_does_not_log_api_key(tmp_path, monkeypatch):
     root.withdraw()
     try:
         app = AlmurribApp(root)
+        app.set_mode("advanced")
         app.api_key.set("super-secret-key")
         app._info("failed with key super-secret-key in header")
         content = app.log.get("1.0", "end")
@@ -130,6 +131,7 @@ def test_provider_dropdown_lists_registry(tmp_path, monkeypatch):
     root.withdraw()
     try:
         app = AlmurribApp(root)
+        app.set_mode("advanced")
         values = list(app.prov_combo.cget("values"))
         for definition in PROVIDERS.values():
             assert definition.display_name in values
@@ -155,6 +157,7 @@ def test_fallback_models_shown_without_fetch(tmp_path):
     root.withdraw()
     try:
         app = AlmurribApp(root)
+        app.set_mode("advanced")
         app.provider_name.set("OpenRouter")
         app._on_provider_changed()
         values = list(app.model_combo.cget("values"))
@@ -206,6 +209,7 @@ def test_gui_receives_live_models_not_static_list(monkeypatch):
     root.withdraw()
     try:
         app = AlmurribApp(root)
+        app.set_mode("advanced")
         app.provider_name.set("OpenAI")
         app.base_url.set("https://api.openai.com/v1")
         app.api_key.set("test-key")
@@ -215,6 +219,130 @@ def test_gui_receives_live_models_not_static_list(monkeypatch):
         values = list(app.model_combo.cget("values"))
         assert "gpt-5-brand-new" in values  # live id, absent from static list
         assert "Live provider API" in app.models_source.get()
+    finally:
+        root.destroy()
+
+
+def test_simple_mode_default_and_switch(tmp_path):
+    """Simple is the default; switching preserves fields and pool."""
+    pytest.importorskip("tkinter")
+    if not _display_available():
+        pytest.skip("no display available")
+
+    from tkinter import Tk
+
+    from almurrib.gui.app import AlmurribApp
+
+    root = Tk()
+    root.withdraw()
+    try:
+        app = AlmurribApp(root)
+        assert app.ui_mode == "simple"
+        assert app.btn_start.cget("text") == "START"
+        assert not hasattr(app, "log")  # no internals exposed
+        app.game_dir.set("some-game")
+        app.provider_name.set("OpenRouter")
+        app._on_provider_changed()
+        app.set_mode("advanced")
+        assert app.ui_mode == "advanced"
+        assert hasattr(app, "log")
+        assert app.game_dir.get() == "some-game"  # fields survive
+        assert list(app.model_combo.cget("values"))  # pool applied
+        app.set_mode("simple")
+        assert app.ui_mode == "simple"
+        assert app.game_dir.get() == "some-game"
+    finally:
+        root.destroy()
+
+
+def test_ui_lang_toggle_rebuilds_without_crash(tmp_path, monkeypatch):
+    """LTR/RTL switch rebuilds chrome; state (pool, fields) survives."""
+    pytest.importorskip("tkinter")
+    if not _display_available():
+        pytest.skip("no display available")
+
+    from tkinter import Tk
+
+    from almurrib.gui.app import AlmurribApp
+
+    root = Tk()
+    root.withdraw()
+    try:
+        monkeypatch.chdir(tmp_path)  # isolated .env for UI_LANG persistence
+        app = AlmurribApp(root)
+        app.set_mode("advanced")
+        assert app.ui_lang == "en"
+        assert app.btn_detect.cget("text") == "Detect"
+        app._toggle_ui_lang()
+        assert app.ui_lang == "ar"
+        assert app.btn_detect.cget("text") == "كشف"
+        # pack side mirrored: leading widgets now pack RIGHT
+        assert app.btn_translate.pack_info()["side"] == "right"
+        app.model.set("custom-model")
+        app._toggle_ui_lang()
+        assert app.ui_lang == "en"
+        assert app.btn_detect.cget("text") == "Detect"
+        assert app.model.get() == "custom-model"  # typed text survives
+        assert app.btn_translate.pack_info()["side"] == "left"
+    finally:
+        root.destroy()
+
+
+def test_simple_localize_end_to_end(renpy_fixture_dir, tmp_path, monkeypatch):
+    """Simple-mode START runs the whole pipeline (FakeProvider, tmp base)."""
+    pytest.importorskip("tkinter")
+    if not _display_available():
+        pytest.skip("no display available")
+
+    from tkinter import Tk
+
+    from almurrib.gui.app import AlmurribApp
+    from almurrib.providers.fake import FakeProvider
+
+    root = Tk()
+    root.withdraw()
+    try:
+        monkeypatch.chdir(tmp_path)  # managed db/out land here, not the repo
+        app = AlmurribApp(root)
+        assert app.ui_mode == "simple"
+        app.game_dir.set(str(renpy_fixture_dir))
+        monkeypatch.setattr(app, "_provider", lambda: FakeProvider())
+        summary = app.run_simple_localize()
+        assert "11/11 translated" in summary
+        assert (tmp_path / "out" / "game" / "tl" / "arabic" / "strings.rpy").exists()
+        assert (tmp_path / "almurrib.db").exists()
+    finally:
+        root.destroy()
+
+
+def test_simple_flow_exports_only_after_success(renpy_fixture_dir, tmp_path,
+                                                monkeypatch):
+    """Regression: export must run on success (never stranded under raise)."""
+    pytest.importorskip("tkinter")
+    if not _display_available():
+        pytest.skip("no display available")
+
+    from tkinter import Tk
+
+    from almurrib.core.errors import RateLimitError
+    from almurrib.gui.app import AlmurribApp
+    from almurrib.providers.fake import FakeProvider
+
+    root = Tk()
+    root.withdraw()
+    try:
+        monkeypatch.chdir(tmp_path)
+        app = AlmurribApp(root)
+        app.game_dir.set(str(renpy_fixture_dir))
+
+        class _Down(FakeProvider):
+            def translate_batch(self, requests):
+                raise RateLimitError("limited", http_status=429)
+
+        monkeypatch.setattr(app, "_provider", lambda: _Down())
+        with pytest.raises(Exception):
+            app.run_simple_localize()
+        assert not (tmp_path / "out").exists()  # failed run exports nothing
     finally:
         root.destroy()
 
@@ -234,6 +362,7 @@ def test_legacy_provider_display_resolves(tmp_path):
     root.withdraw()
     try:
         app = AlmurribApp(root)
+        app.set_mode("advanced")
         assert "OpenAI-Compatible (custom URL)" in list(
             app.prov_combo.cget("values"))
     finally:
@@ -254,6 +383,7 @@ def test_apply_models_populates_selector(tmp_path):
     root.withdraw()
     try:
         app = AlmurribApp(root)
+        app.set_mode("advanced")
         from almurrib.providers.discovery import SOURCE_LIVE
         app._apply_models([ModelInfo(id="a"), ModelInfo(id="b")], SOURCE_LIVE)
         assert list(app.model_combo.cget("values")) == ["a", "b"]
@@ -282,6 +412,7 @@ def test_output_defaults_anchored_to_app_base(tmp_path, monkeypatch):
     try:
         monkeypatch.chdir(tmp_path)  # launch CWD differs from repo
         app = AlmurribApp(root)
+        app.set_mode("advanced")
         from almurrib.core.paths import app_base_dir
 
         base = app_base_dir()

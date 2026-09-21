@@ -60,6 +60,9 @@ def discovery_strategy(definition: ProviderDefinition) -> list[str]:
     """Ordered strategy names for a provider (explicit, data-driven)."""
     if definition.discovery == "none":
         return [STATIC_FALLBACK]
+    if definition.discovery == "argos":
+        # Installed-packages listing is authoritative and local.
+        return [OFFICIAL_API, STATIC_FALLBACK]
     steps = [OFFICIAL_API]
     if definition.external_catalog == "models_dev":
         steps.append(MODELS_DEV)
@@ -347,6 +350,24 @@ PROVIDERS: dict[str, ProviderDefinition] = {
             "command-a-03-2025",
             "command-r7b-12-2024",
             "command-a-plus-05-2026",
+        ],
+    ),
+    "argos": ProviderDefinition(
+        id="argos",
+        display_name="Argos Translate (offline)",
+        protocol="argos",
+        base_url="local",
+        models_path="",
+        discovery="argos",
+        external_catalog="none",
+        json_object="no",
+        local=True,
+        verified=True,
+        notes="True offline NMT (no key, no network). Model ids look like "
+        "'en_ar'. First use needs the model: almurrib local-models install. "
+        "Placeholder-dropping is common; QA flags apply.",
+        fallback_models=[
+            "en_ar",
         ],
     ),
     "anthropic": ProviderDefinition(

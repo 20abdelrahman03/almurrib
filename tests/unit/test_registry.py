@@ -20,10 +20,13 @@ def test_every_definition_is_complete():
     for definition in PROVIDERS.values():
         assert definition.id
         assert definition.display_name
-        assert definition.protocol in ("openai_chat", "cohere", "anthropic")
-        assert definition.base_url.startswith(("https://", "http://"))
-        assert definition.models_path.startswith("/")
-        assert definition.discovery in ("openai", "cohere", "none")
+        assert definition.protocol in ("openai_chat", "cohere", "anthropic", "argos")
+        if definition.id == "argos":
+            assert definition.base_url == "local"  # no endpoint by design
+        else:
+            assert definition.base_url.startswith(("https://", "http://"))
+            assert definition.models_path.startswith("/")
+        assert definition.discovery in ("openai", "cohere", "none", "argos")
         assert definition.json_object in ("yes", "no", "model-dependent")
 
 

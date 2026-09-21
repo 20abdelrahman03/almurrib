@@ -75,7 +75,7 @@ class EntryRepository:
                 qa_flags_json, metadata_json, model_version,
                 translation_provider, translation_model, translation_source
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
+            ON CONFLICT(project_id, id) DO UPDATE SET
                 translated_text = COALESCE(excluded.translated_text, translated_text),
                 status = CASE
                     WHEN excluded.translated_text IS NULL
@@ -207,26 +207,37 @@ class EntryRepository:
         return len(stale)
 
     def upsert_for_entries(self, entries: list[LocalizationEntry]) -> int:
-        """Persist entries against their originating project (looked up per entry).
+        """Persist entries against their originating project(s).
 
         Used when re-saving entries that already exist in the database
         (e.g. after translation) without needing the project id at hand.
+        An id shared by several projects (identical content) updates every
+        matching row — identical content means identical state.
         """
         count = 0
         for entry in entries:
-            row = self._conn.execute(
+            rows = self._conn.execute(
                 "SELECT project_id FROM localization_entries WHERE id = ?",
                 (entry.id,),
-            ).fetchone()
-            if row is not None:
+            ).fetchall()
+            for row in rows:
                 self.upsert(int(row["project_id"]), entry)
                 count += 1
         return count
 
-    def get(self, entry_id: str) -> LocalizationEntry | None:
-        row = self._conn.execute(
-            "SELECT * FROM localization_entries WHERE id = ?", (entry_id,)
-        ).fetchone()
+    def get(self, entry_id: str,
+            project_id: int | None = None) -> LocalizationEntry | None:
+        if project_id is None:
+            row = self._conn.execute(
+                "SELECT * FROM localization_entries WHERE id = ? "
+                "ORDER BY project_id LIMIT 1",
+                (entry_id,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT * FROM localization_entries WHERE id = ? AND project_id = ?",
+                (entry_id, project_id),
+            ).fetchone()
         return self._row_to_entry(row) if row else None
 
     def list(

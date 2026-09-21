@@ -60,6 +60,10 @@ class TranslationRequest:
     speaker: str | None = None
     context: str | None = None
     placeholders: list[str] = field(default_factory=list)
+    # Glossary guidance (provider-independent; rendered into the prompt).
+    speaker_gender: str | None = None
+    speaker_style: str | None = None
+    glossary_terms: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass

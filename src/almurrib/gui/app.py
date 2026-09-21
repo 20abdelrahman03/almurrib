@@ -126,12 +126,54 @@ class AlmurribApp:
         self.model = StringVar(value=self._settings.model)
         self.api_key = StringVar(value=self._settings.api_key or "")
         self.force = BooleanVar(value=False)
+        self.ui_lang = self._settings.ui_lang  # "en" (LTR) | "ar" (RTL)
+        self.ui_mode = "simple"  # default: hide internals (Advanced on demand)
+        self._models_source_id = "static"
+        self.phase = StringVar(value="")
+        self.detect_info = StringVar(value="")
+        self.status_line = StringVar(value="")
 
+        self.content = Frame(root)
+        self.content.pack(fill=BOTH, expand=True)
         self._build_ui()
         self._on_provider_changed(select_base_url=False)
-        self._info(f"config: {default_env_file()}")
+        self._info(self._t("config_where", path=str(default_env_file())))
         self._load_cached_catalog()
         self.root.after(80, self._poll_queue)
+
+    # ------------------------------------------------------------- i18n/RTL
+
+    def _t(self, key: str, **values: object) -> str:
+        from almurrib.gui.i18n import t
+
+        return t(key, self.ui_lang, **values)
+
+    def _rtl(self) -> bool:
+        return self.ui_lang == "ar"
+
+    def _toggle_ui_lang(self) -> None:
+        """Flip LTR/RTL: persist, rebuild content, restore transient state."""
+        self.ui_lang = "ar" if self.ui_lang == "en" else "en"
+        try:
+            save_env_file(default_env_file(), {ENV_PREFIX + "UI_LANG": self.ui_lang})
+        except OSError:
+            pass  # persistence is best-effort; the session still switches
+        saved_log = self._log_text() if hasattr(self, "log") else ""
+        saved_source = self._models_source_id
+        saved_models = list(self._models)
+        self.content.destroy()
+        from tkinter import Frame as _Frame
+
+        self.content = _Frame(self.root)
+        self.content.pack(fill=BOTH, expand=True)
+        self._build_ui()
+        if saved_log.strip():
+            self.log.configure(state="normal")
+            self.log.insert(END, saved_log)
+            self.log.configure(state="disabled")
+        # _models always mirrors the pool (live or fallback), so one path
+        # restores catalog, badge and details together.
+        self._apply_models(saved_models, saved_source)
 
     def _load_cached_catalog(self) -> None:
         """Startup: use the cached catalog when fresh, else the fallback."""
@@ -149,137 +191,286 @@ class AlmurribApp:
     # ------------------------------------------------------------- UI layout
 
     def _build_ui(self) -> None:
-        pad = {"padx": 6, "pady": 3}
+        if self.ui_mode == "simple":
+            self._build_simple()
+        else:
+            self._build_advanced()
 
-        frm_game = Frame(self.root)
+    def set_mode(self, mode: str) -> None:
+        """Switch Simple/Advanced, preserving fields, pool and log text."""
+        if mode not in ("simple", "advanced") or mode == self.ui_mode:
+            return
+        self.ui_mode = mode
+        saved_log = self._log_text() if hasattr(self, "log") else ""
+        saved_models = list(self._models)
+        saved_source = self._models_source_id
+        self.content.destroy()
+        from tkinter import Frame as _Frame
+
+        self.content = _Frame(self.root)
+        self.content.pack(fill=BOTH, expand=True)
+        self._build_ui()
+        if saved_log.strip() and hasattr(self, "log"):
+            self.log.configure(state="normal")
+            self.log.insert(END, saved_log)
+            self.log.configure(state="disabled")
+        if hasattr(self, "model_combo"):
+            # Re-apply the pool: fresh widgets start with empty values.
+            self._apply_models(saved_models, saved_source)
+
+    def _build_simple(self) -> None:
+        """Beginner flow: game, language, provider, START. No internals."""
+        from almurrib.engine_adapters.info import get_engine_info
+
+        pad = {"padx": 8, "pady": 6}
+        rtl = self._rtl()
+        side = RIGHT if rtl else LEFT
+        tail = LEFT if rtl else RIGHT
+        anchor = "e" if rtl else "w"
+
+        top = Frame(self.content)
+        top.pack(fill=X, **pad)
+        Label(top, text="المعرب Almurrib", font=("Segoe UI", 14, "bold"),
+              anchor=anchor).pack(side=side)
+        Button(top, text=self._t("advanced_mode"),
+               command=lambda: self.set_mode("advanced")).pack(side=tail)
+
+        frm_game = Frame(self.content)
         frm_game.pack(fill=X, **pad)
-        Label(frm_game, text="Game Folder:", width=14, anchor="w").pack(side=LEFT)
-        game_entry = Entry(frm_game, textvariable=self.game_dir)
-        game_entry.pack(side=LEFT, fill=X, expand=True)
+        Label(frm_game, text=self._t("game"), width=12,
+              anchor=anchor).pack(side=side)
+        game_entry = Entry(frm_game, textvariable=self.game_dir,
+                           justify="right" if rtl else "left")
+        game_entry.pack(side=side, fill=X, expand=True)
         attach_editing(game_entry)
-        Button(frm_game, text="اختيار مجلد اللعبة", command=self._pick_game).pack(side=RIGHT)
+        Button(frm_game, text=self._t("choose_game"),
+               command=self._pick_game_and_detect).pack(side=tail)
 
-        frm_db = Frame(self.root)
-        frm_db.pack(fill=X, **pad)
-        Label(frm_db, text="Database:", width=14, anchor="w").pack(side=LEFT)
-        db_entry = Entry(frm_db, textvariable=self.db_path)
-        db_entry.pack(side=LEFT, fill=X, expand=True)
-        attach_editing(db_entry)
-        Button(frm_db, text="Browse…", command=self._pick_db).pack(side=RIGHT)
-
-        frm_lang = Frame(self.root)
+        frm_lang = Frame(self.content)
         frm_lang.pack(fill=X, **pad)
-        Label(frm_lang, text="Source:").pack(side=LEFT)
-        self.src_combo = Combobox(
-            frm_lang, textvariable=self.source_lang, width=14,
-            values=sorted(SOURCE_LANGS), state="readonly",
-        )
-        self.src_combo.pack(side=LEFT, padx=(2, 16))
-        Label(frm_lang, text="Target:").pack(side=LEFT)
-        self.tgt_combo = Combobox(
-            frm_lang, textvariable=self.target_lang, width=14,
-            values=sorted(TARGET_LANGS), state="readonly",
-        )
-        self.tgt_combo.pack(side=LEFT, padx=(2, 0))
-        attach_editing(self.tgt_combo)
+        Label(frm_lang, text=self._t("language"), width=12,
+              anchor=anchor).pack(side=side)
+        self.tgt_combo_simple = Combobox(
+            frm_lang, textvariable=self.target_lang, width=20,
+            values=sorted(TARGET_LANGS), state="readonly")
+        self.tgt_combo_simple.pack(side=side)
 
-        frm_out = Frame(self.root)
-        frm_out.pack(fill=X, **pad)
-        Label(frm_out, text="Output Folder:", width=14, anchor="w").pack(side=LEFT)
-        out_entry = Entry(frm_out, textvariable=self.output_dir)
-        out_entry.pack(side=LEFT, fill=X, expand=True)
-        attach_editing(out_entry)
-        Button(frm_out, text="Browse…", command=self._pick_output).pack(side=RIGHT)
-
-        frm_prov = LabelFrame(self.root, text="Provider Configuration")
+        frm_prov = LabelFrame(self.content, text=self._t("provider_config"))
         frm_prov.pack(fill=X, **pad)
-        Label(frm_prov, text="Provider:", width=12, anchor="w").grid(
-            row=0, column=0, sticky="w", padx=4)
+        Label(frm_prov, text=self._t("provider"), width=12,
+              anchor=anchor).grid(row=0, column=0, sticky=anchor, padx=4)
         self.prov_combo = Combobox(
             frm_prov, textvariable=self.provider_name, state="readonly",
-            values=[d.display_name for d in list_definitions()],
-        )
+            values=[d.display_name for d in list_definitions()])
         self.prov_combo.grid(row=0, column=1, sticky="ew", padx=4, pady=2)
         self.prov_combo.bind("<<ComboboxSelected>>",
                              lambda e: self._on_provider_changed())
-        self._labeled_entry(frm_prov, "Base URL:", self.base_url, 1)
-        Label(frm_prov, text="Model:", width=12, anchor="w").grid(
-            row=2, column=0, sticky="w", padx=4)
+        Label(frm_prov, text=self._t("model"), width=12,
+              anchor=anchor).grid(row=1, column=0, sticky=anchor, padx=4)
         self.model_combo = Combobox(frm_prov, textvariable=self.model)
-        self.model_combo.grid(row=2, column=1, sticky="ew", padx=4, pady=2)
+        self.model_combo.grid(row=1, column=1, sticky="ew", padx=4, pady=2)
+        self.model_combo.bind("<KeyRelease>", lambda e: self._filter_models())
+        attach_editing(self.model_combo)
+        Label(frm_prov, text=self._t("api_key_optional"), width=12,
+              anchor=anchor).grid(row=2, column=0, sticky=anchor, padx=4)
+        key_entry = Entry(frm_prov, textvariable=self.api_key, show="*")
+        key_entry.grid(row=2, column=1, sticky="ew", padx=4, pady=2)
+        attach_editing(key_entry)
+        frm_prov.columnconfigure(1, weight=1)
+
+        self.detect_label = Label(self.content, textvariable=self.detect_info,
+                                  anchor=anchor, wraplength=640, justify="left")
+        self.detect_label.pack(fill=X, **pad)
+
+        self.btn_start = Button(self.content, text=self._t("start"),
+                                command=self._on_start_simple,
+                                font=("Segoe UI", 12, "bold"))
+        self.btn_start.pack(fill=X, padx=8, pady=8)
+        self.btn_unity_simple = Button(
+            self.content, text=self._t("unity_one_click"),
+            command=self._on_unity_panel)
+        self.btn_unity_simple.pack(fill=X, padx=8, pady=2)
+        self._action_buttons = [self.btn_start]
+
+        self.progress = Progressbar(self.content, mode="determinate", maximum=100)
+        self.progress.pack(fill=X, padx=8, pady=4)
+        Label(self.content, textvariable=self.phase, anchor=anchor).pack(fill=X, **pad)
+        Label(self.content, textvariable=self.status_line, anchor=anchor,
+              wraplength=640, justify="left").pack(fill=X, **pad)
+        self.status_line.set(self._t("status_ready"))
+        self._apply_fallback(silent=True)
+
+    def _build_advanced(self) -> None:
+        pad = {"padx": 6, "pady": 3}
+        Button(self.content, text=self._t("simple_mode"),
+               command=lambda: self.set_mode("simple")).pack(
+                   anchor="e" if self._rtl() else "w", padx=6)
+        rtl = self._rtl()
+        side = RIGHT if rtl else LEFT  # leading side mirrors in RTL
+        tail = LEFT if rtl else RIGHT  # trailing side mirrors in RTL
+        anchor = "e" if rtl else "w"
+        justify = "right" if rtl else "left"
+        label_col, entry_col = (1, 0) if rtl else (0, 1)
+
+        def row(parent):
+            frame = Frame(parent)
+            frame.pack(fill=X, **pad)
+            return frame
+
+        def field_label(parent, key: str, width: int = 14):
+            Label(parent, text=self._t(key), width=width,
+                  anchor=anchor).pack(side=side)
+            return None
+
+        def field_entry(parent, variable) -> Entry:
+            entry = Entry(parent, textvariable=variable, justify=justify)
+            entry.pack(side=side, fill=X, expand=True)
+            attach_editing(entry)
+            return entry
+
+        def field_button(parent, key: str, command) -> Button:
+            button = Button(parent, text=self._t(key), command=command)
+            button.pack(side=tail)
+            return button
+
+        frm_game = row(self.content)
+        field_label(frm_game, "game_folder")
+        field_entry(frm_game, self.game_dir)
+        field_button(frm_game, "choose_game", self._pick_game)
+
+        frm_db = row(self.content)
+        field_label(frm_db, "database")
+        field_entry(frm_db, self.db_path)
+        field_button(frm_db, "browse", self._pick_db)
+
+        frm_lang = row(self.content)
+        Label(frm_lang, text=self._t("source"), anchor=anchor).pack(side=side)
+        self.src_combo = Combobox(
+            frm_lang, textvariable=self.source_lang, width=14,
+            values=sorted(SOURCE_LANGS), state="readonly", justify=justify,
+        )
+        self.src_combo.pack(side=side, padx=(2, 16))
+        Label(frm_lang, text=self._t("target"), anchor=anchor).pack(side=side)
+        self.tgt_combo = Combobox(
+            frm_lang, textvariable=self.target_lang, width=14,
+            values=sorted(TARGET_LANGS), state="readonly", justify=justify,
+        )
+        self.tgt_combo.pack(side=side, padx=(2, 0))
+        attach_editing(self.tgt_combo)
+        Button(frm_lang, text=self._t("ui_language"),
+               command=self._toggle_ui_lang).pack(side=tail, padx=4)
+
+        frm_out = row(self.content)
+        field_label(frm_out, "output_folder")
+        field_entry(frm_out, self.output_dir)
+        field_button(frm_out, "browse", self._pick_output)
+
+        frm_prov = LabelFrame(self.content, text=self._t("provider_config"))
+        frm_prov.pack(fill=X, **pad)
+        Label(frm_prov, text=self._t("provider"), width=12,
+              anchor=anchor).grid(row=0, column=label_col, sticky=anchor, padx=4)
+        self.prov_combo = Combobox(
+            frm_prov, textvariable=self.provider_name, state="readonly",
+            values=[d.display_name for d in list_definitions()],
+            justify=justify,
+        )
+        self.prov_combo.grid(row=0, column=entry_col, sticky="ew", padx=4, pady=2)
+        self.prov_combo.bind("<<ComboboxSelected>>",
+                             lambda e: self._on_provider_changed())
+        self._labeled_entry(frm_prov, "base_url", self.base_url, 1,
+                            label_col, entry_col, anchor, justify)
+        Label(frm_prov, text=self._t("model"), width=12,
+              anchor=anchor).grid(row=2, column=label_col, sticky=anchor, padx=4)
+        self.model_combo = Combobox(frm_prov, textvariable=self.model,
+                                    justify=justify)
+        self.model_combo.grid(row=2, column=entry_col, sticky="ew", padx=4, pady=2)
         self.model_combo.bind("<KeyRelease>", lambda e: self._filter_models())
         self.model_combo.bind("<<ComboboxSelected>>",
                               lambda e: self._show_model_details())
         attach_editing(self.model_combo)
-        self.models_source = StringVar(value="Models source: ● Static fallback")
-        Label(frm_prov, textvariable=self.models_source, anchor="w").grid(
-            row=3, column=1, sticky="ew", padx=4)
+        self.models_source = StringVar(value="")
+        self._set_models_source(self._models_source_id)
+        Label(frm_prov, textvariable=self.models_source,
+              anchor=anchor).grid(row=3, column=entry_col, sticky="ew", padx=4)
         self.model_details = StringVar(value="")
-        Label(frm_prov, textvariable=self.model_details, anchor="w",
-              wraplength=560, justify=LEFT).grid(
-            row=4, column=1, sticky="ew", padx=4)
-        self._labeled_entry(frm_prov, "API Key:", self.api_key, 5, secret=True)
+        Label(frm_prov, textvariable=self.model_details, anchor=anchor,
+              wraplength=560, justify=justify).grid(
+            row=4, column=entry_col, sticky="ew", padx=4)
+        self._labeled_entry(frm_prov, "api_key", self.api_key, 5,
+                            label_col, entry_col, anchor, justify, secret=True)
+        frm_prov.columnconfigure(0, weight=1)
         frm_prov.columnconfigure(1, weight=1)
 
         frm_pbtns = Frame(frm_prov)
         frm_pbtns.grid(row=6, column=0, columnspan=2, sticky="ew", padx=4, pady=4)
-        Button(frm_pbtns, text="Test Connection",
-               command=self._on_test_connection).pack(side=LEFT, padx=2)
-        Button(frm_pbtns, text="Refresh Models",
-               command=self._on_refresh_models).pack(side=LEFT, padx=2)
-        Button(frm_pbtns, text="Save Configuration",
-               command=self._save_config).pack(side=RIGHT, padx=2)
+        Button(frm_pbtns, text=self._t("test_connection"),
+               command=self._on_test_connection).pack(side=side, padx=2)
+        Button(frm_pbtns, text=self._t("refresh_models"),
+               command=self._on_refresh_models).pack(side=side, padx=2)
+        Button(frm_pbtns, text=self._t("save_config"),
+               command=self._save_config).pack(side=tail, padx=2)
 
-        frm_force = Frame(self.root)
-        frm_force.pack(fill=X, **pad)
+        frm_force = row(self.content)
         from tkinter import Checkbutton
-        Checkbutton(frm_force, text="Force retranslation (ignore TM/cache/translated)",
-                    variable=self.force).pack(side=LEFT)
+        Checkbutton(frm_force, text=self._t("force_retrans"),
+                    variable=self.force, anchor=anchor).pack(side=side)
 
-        frm_actions = Frame(self.root)
-        frm_actions.pack(fill=X, **pad)
-        self.btn_detect = Button(frm_actions, text="Detect", command=self._on_detect)
-        self.btn_extract = Button(frm_actions, text="Extract", command=self._on_extract)
-        self.btn_translate = Button(frm_actions, text="Translate", command=self._on_translate)
-        self.btn_export = Button(frm_actions, text="Export", command=self._on_export)
-        self.btn_clear = Button(frm_actions, text="Clear Translations",
+        frm_actions = row(self.content)
+        self.btn_detect = Button(frm_actions, text=self._t("detect"),
+                                 command=self._on_detect)
+        self.btn_extract = Button(frm_actions, text=self._t("extract"),
+                                  command=self._on_extract)
+        self.btn_translate = Button(frm_actions, text=self._t("translate"),
+                                    command=self._on_translate)
+        self.btn_export = Button(frm_actions, text=self._t("export"),
+                                 command=self._on_export)
+        self.btn_clear = Button(frm_actions, text=self._t("clear_trans"),
                                 command=self._on_clear)
         for b in (self.btn_detect, self.btn_extract, self.btn_translate,
                   self.btn_export, self.btn_clear):
-            b.pack(side=LEFT, padx=3, expand=True, fill=X)
+            b.pack(side=side, padx=3, expand=True, fill=X)
 
         self.btn_localize = Button(
-            self.root, text="LOCALIZE GAME", command=self._on_localize,
+            self.content, text=self._t("localize_game"), command=self._on_localize,
             font=("Segoe UI", 11, "bold"),
         )
         self.btn_localize.pack(fill=X, padx=6, pady=6)
+        self.btn_unity = Button(
+            self.content, text=self._t("unity_one_click"),
+            command=self._on_unity_panel,
+            font=("Segoe UI", 11, "bold"),
+        )
+        self.btn_unity.pack(fill=X, padx=6, pady=2)
         self._action_buttons = [
             self.btn_detect, self.btn_extract, self.btn_translate,
             self.btn_export, self.btn_clear, self.btn_localize,
         ]
 
-        self.progress = Progressbar(self.root, mode="determinate", maximum=100)
+        self.progress = Progressbar(self.content, mode="determinate", maximum=100)
         self.progress.pack(fill=X, padx=6, pady=3)
 
-        frm_log = LabelFrame(self.root, text="Log")
+        frm_log = LabelFrame(self.content, text=self._t("log"))
         frm_log.pack(fill=BOTH, expand=True, padx=6, pady=6)
         frm_logbtns = Frame(frm_log)
         frm_logbtns.pack(fill=X, padx=2, pady=2)
-        Button(frm_logbtns, text="Copy Log", command=self._copy_log).pack(
-            side=LEFT, padx=2)
-        Button(frm_logbtns, text="Clear Log", command=self._clear_log).pack(
-            side=LEFT, padx=2)
+        Button(frm_logbtns, text=self._t("copy_log"),
+               command=self._copy_log).pack(side=side, padx=2)
+        Button(frm_logbtns, text=self._t("clear_log"),
+               command=self._clear_log).pack(side=side, padx=2)
         self.log = Text(frm_log, state="disabled", wrap="word", height=10,
                         undo=True, maxundo=50)
         self.log.pack(fill=BOTH, expand=True)
         self._attach_log_menu()
 
-    @staticmethod
-    def _labeled_entry(parent, label, variable, row, *, secret: bool = False) -> Entry:
-        Label(parent, text=label, width=12, anchor="w").grid(row=row, column=0, sticky="w", padx=4)
-        entry = Entry(parent, textvariable=variable)
-        entry.grid(row=row, column=1, sticky="ew", padx=4, pady=2)
-        parent.columnconfigure(1, weight=1)
+    def _labeled_entry(self, parent, label_key: str, variable, row: int,
+                       label_col: int, entry_col: int,
+                       anchor: str, justify: str, *,
+                       secret: bool = False) -> Entry:
+        Label(parent, text=self._t(label_key), width=12,
+              anchor=anchor).grid(row=row, column=label_col, sticky=anchor,
+                                  padx=4)
+        entry = Entry(parent, textvariable=variable, justify=justify)
+        entry.grid(row=row, column=entry_col, sticky="ew", padx=4, pady=2)
         if secret:
             entry.config(show="*")  # mask on screen; clipboard still works
         attach_editing(entry)
@@ -295,11 +486,11 @@ class AlmurribApp:
 
     def _attach_log_menu(self) -> None:
         menu = Menu(self.log, tearoff=0)
-        menu.add_command(label="Copy", command=self._copy_selection)
-        menu.add_command(label="Copy All", command=self._copy_log)
-        menu.add_command(label="Select All", command=self._select_log_all)
+        menu.add_command(label=self._t("copy"), command=self._copy_selection)
+        menu.add_command(label=self._t("copy_all"), command=self._copy_log)
+        menu.add_command(label=self._t("select_all"), command=self._select_log_all)
         menu.add_separator()
-        menu.add_command(label="Clear Log", command=self._clear_log)
+        menu.add_command(label=self._t("clear_log"), command=self._clear_log)
         self.log.bind("<Button-3>",
                       lambda e: (self.log.focus_set(),
                                  menu.tk_popup(e.x_root, e.y_root)))
@@ -318,7 +509,7 @@ class AlmurribApp:
     def _copy_log(self) -> None:
         self.log.clipboard_clear()
         self.log.clipboard_append(self._redact(self._log_text()))
-        self._info("log copied to clipboard (secrets redacted)")
+        self._info(self._t("log_copied"))
 
     def _select_log_all(self) -> None:
         self.log.tag_add("sel", "1.0", END)
@@ -332,6 +523,11 @@ class AlmurribApp:
 
     def _log(self, level: str, message: str) -> None:
         message = self._redact(message)
+        if hasattr(self, "status_line"):
+            # Simple mode has no log pane: mirror the latest line.
+            self.status_line.set(f"[{level}] {message}")
+        if not hasattr(self, "log"):
+            return
         self.log.configure(state="normal")
         self.log.insert(END, f"[{level}] {message}\n")
         self.log.see(END)
@@ -349,20 +545,61 @@ class AlmurribApp:
     # ------------------------------------------------------------- pickers
 
     def _pick_game(self) -> None:
-        path = filedialog.askdirectory(title="اختيار مجلد اللعبة")
+        path = filedialog.askdirectory(title=self._t("pick_game_title"))
         if path:
             self.game_dir.set(path)
 
+    def _pick_game_and_detect(self) -> None:
+        self._pick_game()
+        if self.game_dir.get().strip():
+            self._refresh_detection()
+
+    def _describe_detection(self) -> str:
+        """Human detection + capability lines (Simple mode + auto display)."""
+        from almurrib.engine_adapters.info import get_engine_info
+
+        try:
+            pipeline = LocalizationPipeline(adapters=default_adapters())
+            adapter = pipeline.detect_engine(self._game_path())
+            engine_id = adapter.engine_type.value
+        except Exception as exc:
+            from almurrib.engine_adapters.registry import misplaced_dir_hint
+
+            message = f"{self._t('detect_none')} ({exc})"
+            hint = misplaced_dir_hint(self._game_path())
+            return message + (f"\n{hint}" if hint else "")
+        info = get_engine_info(engine_id)
+        head = self._t("detect_info", engine=info.display_name if info else engine_id)
+        if info is None:
+            return head
+        yes = "✓"
+        no = f"✗ ({self._t('cap_unsupported')})"
+        lines = [head,
+                 f"{self._t('cap_extract')}: {yes if info.extract != 'unsupported' else no}",
+                 f"{self._t('cap_build')}: {yes if info.export_build != 'unsupported' else no}",
+                 f"{self._t('cap_runtime')}: {yes if info.runtime != 'unsupported' else no}"]
+        if info.notes:
+            lines.append(info.notes)
+        return "\n".join(lines)
+
+    def _refresh_detection(self) -> None:
+        def work() -> str:
+            text = self._describe_detection()
+            self._queue.put(("detect_info", text))
+            return text
+
+        self._run_async(self._t("detecting"), work)
+
     def _pick_db(self) -> None:
         path = filedialog.asksaveasfilename(
-            title="Database", defaultextension=".db",
+            title=self._t("pick_db_title"), defaultextension=".db",
             filetypes=[("SQLite", "*.db"), ("All", "*.*")],
         )
         if path:
             self.db_path.set(path)
 
     def _pick_output(self) -> None:
-        path = filedialog.askdirectory(title="Output Folder")
+        path = filedialog.askdirectory(title=self._t("pick_out_title"))
         if path:
             self.output_dir.set(path)
 
@@ -428,26 +665,38 @@ class AlmurribApp:
         return fetch_models(api_key=api_key, timeout_seconds=30.0, **params)
 
     def _set_models_source(self, source: str) -> None:
-        from almurrib.providers.discovery import SOURCE_BADGES
-
-        self.models_source.set(
-            f"Models source: ● {SOURCE_BADGES.get(source, source)}")
+        names = {
+            "live": self._t("source_live"),
+            "models.dev": self._t("source_models_dev"),
+            "litellm": self._t("source_litellm"),
+            "static": self._t("source_static"),
+            "local": self._t("source_local"),
+        }
+        self._models_source_id = source
+        # Advanced-only widgets: simple mode tracks state without them.
+        if hasattr(self, "models_source"):
+            self.models_source.set(
+                self._t("models_source", source=names.get(source, source)))
 
     def _apply_models(self, models: list[ModelInfo], source: str) -> None:
         self._models = models
         self._model_pool = [m.id for m in models]
-        self.model_combo.configure(values=self._model_pool)
+        if hasattr(self, "model_combo"):
+            self.model_combo.configure(values=self._model_pool)
         self._set_models_source(source)
         self._show_model_details()
 
     def _apply_fallback(self, silent: bool = False) -> None:
         """Show the provider's curated ids when no live catalog is loaded."""
-        from almurrib.providers.discovery import SOURCE_STATIC
+        from almurrib.providers.discovery import SOURCE_STATIC, ModelInfo
 
         definition = self._definition()
         pool = list(definition.fallback_models) if definition else []
+        self._models = [ModelInfo(id=mid, provider=self._provider_id(),
+                                  source=SOURCE_STATIC) for mid in pool]
         self._model_pool = pool
-        self.model_combo.configure(values=pool)
+        if hasattr(self, "model_combo"):
+            self.model_combo.configure(values=pool)
         self._set_models_source(SOURCE_STATIC)
         self._show_model_details()
         if pool and not silent:
@@ -459,6 +708,8 @@ class AlmurribApp:
 
     def _show_model_details(self) -> None:
         """Metadata line for the selected model id (Unknown, never guessed)."""
+        if not hasattr(self, "model_combo") or not hasattr(self, "model_details"):
+            return
         wanted = self.model_combo.get().strip()
         for model in self._models:
             if model.id == wanted:
@@ -522,7 +773,7 @@ class AlmurribApp:
                     if len(result.models) > 8 else "")
             return f"{len(result.models)} models available: {shown}{more}"
 
-        self._run_async("Refreshing models...", work)
+        self._run_async(self._t("refreshing"), work)
 
     def _on_test_connection(self) -> None:
         def work() -> str:
@@ -539,7 +790,7 @@ class AlmurribApp:
             ]
             return "\n".join(lines)
 
-        self._run_async("Testing connection...", work)
+        self._run_async(self._t("testing"), work)
 
     # ------------------------------------------------------------- config
 
@@ -557,10 +808,10 @@ class AlmurribApp:
                 ENV_PREFIX + "OUTPUT_DIR": self.output_dir.get(),
             })
         except OSError as exc:
-            self._error(f"could not save configuration: {exc}")
+            self._error(self._t("save_failed", error=exc))
             return
         self._settings = load_settings(env_file=env_path)
-        self._ok(f"configuration saved to {env_path}")
+        self._ok(self._t("config_saved", path=env_path))
 
     # ------------------------------------------------------------- helpers
 
@@ -574,16 +825,19 @@ class AlmurribApp:
         # Build a fresh provider from the on-screen fields (not stale settings).
         from almurrib.core.provider import ProviderConfig
 
+        provider_id = self._provider_id()
+        definition = get_definition(provider_id)
         api_key = self.api_key.get().strip()
-        if not api_key:
+        if not api_key and (definition is None or not definition.local):
             raise AuthenticationError(
                 "no API key configured",
                 hint="enter the API key in the GUI (it is stored in the local .env on Save).",
             )
         config = ProviderConfig(
-            provider=self._provider_id(),
+            provider=provider_id,
             model=self.model.get().strip(),
-            base_url=self.base_url.get().strip(),
+            base_url=self.base_url.get().strip() or (
+                definition.base_url if definition else ""),
             api_key=api_key,
         )
         return build_provider(config)
@@ -596,7 +850,7 @@ class AlmurribApp:
     def _run_async(self, label: str, work, determinate: bool = False) -> None:
         """Run ``work()`` on a background thread; ``work`` returns a message."""
         if self._worker and self._worker.is_alive():
-            messagebox.showinfo(WINDOW_TITLE, "An operation is already running.")
+            messagebox.showinfo(WINDOW_TITLE, self._t("already_running"))
             return
         self._set_running(True)
         self._info(label)
@@ -642,6 +896,15 @@ class AlmurribApp:
                     self._info(f"model list updated ({len(models)} models)")
                 elif kind == "info":
                     self._info(payload)
+                elif kind == "detect_info":
+                    if hasattr(self, "detect_label"):
+                        self.detect_info.set(payload)
+                elif kind == "phase":
+                    if hasattr(self, "phase"):
+                        self.phase.set(self._t("phase", phase=payload))
+                elif kind == "summary":
+                    if hasattr(self, "status_line"):
+                        self.status_line.set(payload)
         except queue.Empty:
             pass
         self.root.after(80, self._poll_queue)
@@ -651,14 +914,61 @@ class AlmurribApp:
 
     # ------------------------------------------------------------- actions
 
+    def _on_unity_panel(self) -> None:
+        from almurrib.gui.unity_panel import open_unity_panel
+
+        open_unity_panel(self)
+
     def _on_detect(self) -> None:
         def work() -> str:
             pipeline = LocalizationPipeline(adapters=default_adapters())
             adapter = pipeline.detect_engine(self._game_path())
             result = adapter.detect(self._game_path())
-            return f"{result.engine.value} detected (confidence {result.confidence:.2f})"
+            return self._t("detected", engine=result.engine.value,
+                               confidence=f"{result.confidence:.2f}")
 
-        self._run_async("Detecting engine...", work)
+        self._run_async(self._t("detecting"), work)
+
+    def _set_phase(self, text: str) -> None:
+        self._queue.put(("phase", text))
+
+    def run_simple_localize(self) -> str:
+        """Simple-mode full flow as one testable unit (worker calls this)."""
+        from almurrib.core.paths import app_base_dir
+
+        base = app_base_dir()
+        pipeline = LocalizationPipeline(adapters=default_adapters())
+        provider = self._provider()
+        db_path = base / "almurrib.db"
+        out_dir = base / "out"
+        self._set_phase(self._t("detecting"))
+        game = self._game_path()
+        with Database(db_path) as db:
+            self._set_phase(self._t("extracting"))
+            entries, project_id = extract_and_store(
+                pipeline, game, db, target_lang=self._target_code())
+            self._set_phase(self._t("translating"))
+            stats = translate_entries(
+                entries, db, provider,
+                source_lang=self._source_code(),
+                target_lang=self._target_code(),
+                project_id=project_id,
+                reuse_machine_tm=self._run_settings(),
+                progress=self._progress_cb)
+            if stats.failed:
+                raise self._failure(stats)
+            self._set_phase(self._t("exporting"))
+            export_translations(
+                pipeline, game, db, output_dir=out_dir,
+                target_lang=self._target_code(), project_id=project_id)
+        summary = self._summary(stats)
+        self._queue.put(("summary", self._t("summary_line", summary=summary)))
+        return summary
+
+    def _on_start_simple(self) -> None:
+        """One-button full localization into managed default locations."""
+        self._run_async(self._t("localizing"), self.run_simple_localize,
+                        determinate=True)
 
     def _on_extract(self) -> None:
         def work() -> str:
@@ -668,9 +978,9 @@ class AlmurribApp:
                     pipeline, self._game_path(), db,
                     target_lang=self._target_code(),
                 )
-            return f"{len(entries)} entries extracted"
+            return self._t("entries_extracted", count=len(entries))
 
-        self._run_async("Extracting text...", work)
+        self._run_async(self._t("extracting"), work)
 
     def _run_settings(self):
         """Fresh TM-reuse setting for each run (cheap file/env read)."""
@@ -706,11 +1016,11 @@ class AlmurribApp:
             with Database(self._db()) as db:
                 project = resolve_project(db, self._game_path())
                 if project is None:
-                    return "no stored project for this game — run Extract first"
+                    return self._t("no_project")
                 repo = EntryRepository(db)
                 entries = repo.list(project_id=project.id)
                 if not entries:
-                    return "no entries stored — run Extract first"
+                    return self._t("no_entries")
                 stats = translate_entries(
                     entries, db, provider,
                     source_lang=self._source_code(),
@@ -725,17 +1035,15 @@ class AlmurribApp:
                 raise self._failure(stats)
             return self._summary(stats)
 
-        self._run_async("Translating...", work, determinate=True)
+        self._run_async(self._t("translating"), work, determinate=True)
 
     def _on_clear(self) -> None:
         """Wipe this game's translations for a clean-slate comparison run."""
         from almurrib.core.workflow import clear_project_translations
 
         if not messagebox.askyesno(
-            WINDOW_TITLE,
-            "Clear all stored translations for this game?\n\n"
-            "Source entries stay; obsolete history is preserved.\n"
-            "Next Translate will call the provider fresh.",
+            self._t("confirm_clear_title"),
+            self._t("confirm_clear_body"),
         ):
             return
 
@@ -743,12 +1051,12 @@ class AlmurribApp:
             with Database(self._db()) as db:
                 project = resolve_project(db, self._game_path())
                 if project is None:
-                    return "no stored project for this game — nothing to clear"
+                    return self._t("nothing_to_clear")
                 count = clear_project_translations(db, project.id)
             return (f"cleared {count} translation(s) — point Output Folder "
                     f"at a fresh dir per model to compare runs side by side")
 
-        self._run_async("Clearing translations...", work)
+        self._run_async(self._t("clearing"), work)
 
     def _on_export(self) -> None:
         def work() -> str:
@@ -762,9 +1070,9 @@ class AlmurribApp:
                     project_id=project.id if project else None,
                 )
             files = "; ".join(str(p) for p in written)
-            return f"exported {len(written)} file(s): {files}"
+            return self._t("exported", count=len(written), files=files)
 
-        self._run_async("Exporting localization...", work)
+        self._run_async(self._t("exporting"), work)
 
     def _on_localize(self) -> None:
         def work() -> str:
@@ -794,12 +1102,13 @@ class AlmurribApp:
                     target_lang=self._target_code(),
                     project_id=project_id,
                 )
-            return (
-                f"{len(entries)} extracted; {stats.api_translated} translated via API; "
-                f"{len(written)} file(s) exported to {out_dir}"
+            return self._t(
+                "localize_done", extracted=len(entries),
+                translated=stats.api_translated,
+                count=len(written), out=out_dir,
             )
 
-        self._run_async("Running full localization...", work, determinate=True)
+        self._run_async(self._t("localizing"), work, determinate=True)
 
 
 def main() -> None:

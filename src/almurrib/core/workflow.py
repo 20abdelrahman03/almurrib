@@ -96,6 +96,19 @@ def load_translation_memory(db: Database) -> dict[str, TMRecord]:
     return memory
 
 
+def load_glossary(db: Database, project_id: int | None = None) -> "Glossary":
+    """Project + global glossary merged (project wins on conflict)."""
+    from almurrib.core.glossary import GLOBAL_PROJECT_ID, Glossary
+    from almurrib.storage.glossary import GlossaryRepository
+
+    repo = GlossaryRepository(db)
+    if project_id is None:
+        global_only = Glossary([e for e in repo.list()
+                                if e.project_id == GLOBAL_PROJECT_ID])
+        return global_only
+    return repo.for_project(project_id)
+
+
 def translate_entries(
     entries: list[LocalizationEntry],
     db: Database,
@@ -106,6 +119,7 @@ def translate_entries(
     project_id: int | None = None,
     force: bool = False,
     reuse_machine_tm: bool = False,
+    glossary: "Glossary | None | bool" = None,
     progress=None,  # optional callable(done: int, total: int)
 ) -> TranslationStats:
     """Translate entries with TM + cache + provider, then persist.
@@ -113,7 +127,22 @@ def translate_entries(
     Force semantics: ignore already-translated text, TM and cache reads;
     the provider is called again and provenance is overwritten with the
     current provider/model. Source extraction is never destructive.
+
+    ``glossary``: None = auto-load project+global glossary from the DB;
+    False = disable glossary entirely; a Glossary = use as given. A
+    non-empty glossary scopes the cache (``:g<rev>`` suffix) so edited
+    glossaries cannot silently serve stale cached text.
     """
+    from almurrib.core.glossary import GLOBAL_PROJECT_ID, Glossary
+
+    if glossary is None:
+        glossary = load_glossary(db, project_id)
+    elif glossary is False:
+        glossary = Glossary()
+    # No cache-identity suffix: per-hit glossary vetoes (see
+    # RealTranslateStage._glossary_veto) invalidate precisely the entries
+    # whose cached text violates the active glossary, keeping unrelated
+    # cache hits stable across glossary edits.
     cache = SQLiteCache(
         db, target_lang=target_lang, provider=provider.config.identity
     )
@@ -124,6 +153,7 @@ def translate_entries(
         memory=memory,
         force=force,
         reuse_machine_tm=reuse_machine_tm,
+        glossary=glossary,
     )
     stats = stage.run(
         entries, source_lang=source_lang, target_lang=target_lang, progress=progress
@@ -157,25 +187,15 @@ def export_translations(
     target_lang: str = "ar",
     project_id: int | None = None,
 ) -> list[Path]:
-    """Generate Ren'Py translation files from stored translations.
+    """Generate engine output files from stored translations.
 
     Scoped to ``project_id`` when given (no cross-project leakage);
-    OBSOLETE entries are never exported.
+    OBSOLETE entries are never exported. Engine branching lives in
+    ``engine_adapters.export`` (never in core).
     """
+    from almurrib.engine_adapters.export import export_for_engine
+
     engine = pipeline.detect_engine(game_dir).engine_type
-    if engine.value != "renpy":
-        from almurrib.core.errors import ExportError
-
-        raise ExportError(
-            f"export not implemented for engine '{engine.value}'",
-            hint="only Ren'Py export is supported in Phase 1.",
-        )
-    from almurrib.engine_adapters.renpy.reinject import write_translation_patch
-
-    repo = EntryRepository(db)
-    entries = [
-        e
-        for e in repo.list(project_id=project_id)
-        if e.translated_text and e.status is not EntryStatus.OBSOLETE
-    ]
-    return write_translation_patch(entries, target_lang=target_lang, output_dir=output_dir)
+    return export_for_engine(
+        engine, game_dir, db, output_dir=output_dir,
+        target_lang=target_lang, project_id=project_id)

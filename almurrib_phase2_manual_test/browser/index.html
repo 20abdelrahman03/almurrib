@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Station 7: The Night Shift Interview (Almurrib Phase 2 test harness)</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1 id="title">Station 7: The Night Shift Interview</h1>
+    <div id="modebar">
+      <span>Mode:</span>
+      <button data-mode="en" class="modebtn active">English</button>
+      <button data-mode="ar" class="modebtn">Arabic</button>
+      <button data-mode="overlay" class="modebtn">English base + Arabic overlay</button>
+      <span id="overlay-badge" hidden>overlay ON — base: English, displayed: Arabic (conceptual Phase 2 test)</span>
+    </div>
+  </header>
+  <section id="start-screen">
+    <label>Player name: <input id="player-name" value="Alex" maxlength="24"></label>
+    <button id="start-btn">Start night shift</button>
+    <p id="load-note" hidden></p>
+  </section>
+  <section id="stage" hidden>
+    <div id="speaker"></div>
+    <div id="text"></div>
+    <div id="choices"></div>
+    <div id="nav">
+      <button id="restart-btn">Restart</button>
+      <span id="progress"></span>
+    </div>
+  </section>
+  <aside id="debug">
+    <h2>Debug panel</h2>
+    <dl>
+      <dt>Dialogue ID</dt><dd id="d-id">—</dd>
+      <dt>Speaker</dt><dd id="d-speaker">—</dd>
+      <dt>Original English</dt><dd id="d-source">—</dd>
+      <dt>Displayed text</dt><dd id="d-display">—</dd>
+      <dt>Glossary matches</dt><dd id="d-gloss">—</dd>
+      <dt>Base Locale</dt><dd id="d-base">English</dd>
+      <dt>Displayed Localization</dt><dd id="d-shown">English</dd>
+      <dt>Overlay State</dt><dd id="d-overlay">OFF</dd>
+      <dt>State flags</dt><dd id="d-flags">—</dd>
+    </dl>
+  </aside>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

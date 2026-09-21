@@ -120,6 +120,30 @@ def test_invalid_json_content_raises(monkeypatch):
         _provider().translate(_request())
 
 
+def test_batch_or_fallback_policy():
+    """Shared policy: whole batch first, singles on malformed, else raise."""
+    from almurrib.core.errors import InvalidResponseError
+    from almurrib.providers.batch_json import batch_or_fallback
+
+    def parse(reply, reqs):
+        if reply == "bad":
+            raise InvalidResponseError("malformed")
+        return [f"ok:{r.entry_id}" for r in reqs]
+
+    results, fallback = batch_or_fallback(lambda: "good", lambda r: "good",
+                                          parse, [_request("a"), _request("b")])
+    assert results == ["ok:a", "ok:b"] and fallback == 0
+
+    results, fallback = batch_or_fallback(
+        lambda: "bad", lambda r: "good", parse, [_request("a"), _request("b")])
+    assert results == ["ok:a", "ok:b"] and fallback == 2
+
+    import pytest
+
+    with pytest.raises(InvalidResponseError):
+        batch_or_fallback(lambda: "bad", lambda r: "bad", parse, [_request("a")])
+
+
 def test_missing_ids_raise(monkeypatch):
     def fake_urlopen(request, timeout=0):
         return _FakeResponse(_http_response({"other": "x"}))

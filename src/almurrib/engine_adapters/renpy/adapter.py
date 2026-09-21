@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from almurrib.core.engine import DetectionResult
+from almurrib.core.errors import ExtractionError
 from almurrib.core.model import (
     EngineType,
     EntryStatus,
@@ -18,7 +19,8 @@ from almurrib.core.model import (
     SourceRef,
     TranslationSource,
 )
-from almurrib.engine_adapters.renpy.parser import RawStatement, parse_rpy
+from almurrib.engine_adapters.raw import RawStatement
+from almurrib.engine_adapters.renpy.parser import parse_rpy
 
 
 class RenPyAdapter:
@@ -27,6 +29,24 @@ class RenPyAdapter:
     @property
     def engine_type(self) -> EngineType:
         return EngineType.RENPY
+
+    def overlay_plan(self, *, target_lang: str = "ar"):
+        """This adapter's overlay strategy (test-locale mechanism).
+
+        Ren'Py discovers ``game/tl/<lang>/`` directories, so Arabic ships
+        as a selectable test locale here. This is ONE strategy instance —
+        other engines will answer differently (see ``core.overlay``).
+        """
+        from almurrib.core.overlay import OverlayPlan, OverlayStrategy
+
+        return OverlayPlan(
+            engine=self.engine_type.value,
+            base_locale="en",
+            displayed_locale=target_lang,
+            active=False,  # activated by the player picking the language
+            strategy=OverlayStrategy.LANGUAGE_DIR,
+            details={"tl_dir": f"game/tl/{target_lang}/"},
+        )
 
     # ----- detection ----------------------------------------------------
 
@@ -44,6 +64,11 @@ class RenPyAdapter:
         if rpy_files:
             confidence += 0.5
             reasons.append(f"found {len(rpy_files)} .rpy script(s)")
+        archives = self._find_archives(game_dir)
+        if archives and not rpy_files:
+            # Packed game: no loose scripts, but archives hold them.
+            confidence += 0.4
+            reasons.append(f"found {len(archives)} .rpa archive(s)")
         if (game_dir / "renpy").is_dir():
             confidence += 0.1
             reasons.append("contains 'renpy/' engine directory")
@@ -52,11 +77,31 @@ class RenPyAdapter:
     # ----- extraction ---------------------------------------------------
 
     def extract(self, game_dir: Path) -> list[LocalizationEntry]:
+        import tempfile
+
+        from almurrib.engine_adapters.renpy.rpa import detect_rpa, extract_all
+
         root = game_dir.resolve()
         entries: list[LocalizationEntry] = []
         for script in self._find_scripts(root):
             for raw in parse_rpy(script, game_root=root):
                 entries.append(self._normalize(raw))
+        for archive in self._find_archives(root):
+            if detect_rpa(archive) is None:
+                continue
+            # Unpack scripts to a temp dir (never into the game), parse
+            # them, and record archive-qualified pseudo-paths.
+            with tempfile.TemporaryDirectory(prefix="almurrib-rpa-") as tmp:
+                tmpdir = Path(tmp)
+                try:
+                    staged = extract_all(archive, tmpdir)
+                except ExtractionError:
+                    continue  # corrupt archive: loose scripts still count
+                rel_archive = archive.relative_to(root).as_posix()
+                for script in staged:
+                    for raw in parse_rpy(script, game_root=tmpdir):
+                        raw.file = f"{rel_archive}#{raw.file}"
+                        entries.append(self._normalize(raw))
         return entries
 
     # ----- helpers ------------------------------------------------------
@@ -76,11 +121,20 @@ class RenPyAdapter:
         return sorted(scripts, key=lambda p: p.as_posix())
 
     @staticmethod
+    def _find_archives(game_dir: Path) -> list[Path]:
+        """Packed ``game/*.rpa`` archives (checked for scripts at extract)."""
+        game_subdir = game_dir / "game"
+        if not game_subdir.is_dir():
+            return []
+        return sorted(game_subdir.glob("*.rpa"))
+
+    @staticmethod
     def _normalize(raw: RawStatement) -> LocalizationEntry:
         statement_kind = {
             "say": "say",
             "menu_choice": "menu",
             "translated_string": "translate_strings",
+            "character_name": "name",
         }.get(raw.kind, raw.kind)
 
         ref = SourceRef(
@@ -93,6 +147,7 @@ class RenPyAdapter:
             "say": ["dialogue"],
             "menu_choice": ["menu", "choice"],
             "translated_string": ["existing_translation"],
+            "character_name": ["character", "name"],
         }.get(raw.kind, [])
 
         context_parts = []

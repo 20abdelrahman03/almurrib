@@ -32,6 +32,10 @@ def build_provider(config: ProviderConfig) -> TranslationProvider:
         )
     if definition.protocol == "cohere":
         return CohereProvider(config)
+    if definition.protocol == "argos":
+        from almurrib.providers.argos import ArgosProvider
+
+        return ArgosProvider(config)
     if definition.protocol == "openai_chat":
         return OpenAICompatibleProvider(config)
     raise ProviderError(
@@ -39,8 +43,3 @@ def build_provider(config: ProviderConfig) -> TranslationProvider:
         "which has no adapter yet",
         hint=(definition.notes or "use a router definition instead."),
     )
-
-
-def preset_base_url(name: str) -> str | None:
-    definition = get_definition(name)
-    return definition.base_url if definition else None

@@ -72,6 +72,12 @@ def test_summary_mixed_progress():
     assert "failed=8" in message
 
 
+def test_summary_flagged_covers_arabic_errors():
+    message = format_translation_summary(
+        _stats(already_translated=75, arabic_errors=3))
+    assert "flagged=3" in message
+
+
 def test_redact_exact_key_and_bearer():
     text = redact_secrets("key sk-secret-123 with Bearer sk-secret-123 here",
                           ["sk-secret-123"])

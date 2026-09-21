@@ -104,19 +104,16 @@ class CohereProvider:
 
     def translate_batch(self, requests: list[TranslationRequest]) -> list[TranslationResult]:
         self.last_fallback_calls = 0
-        text = self._post_chat(build_messages(requests))
-        try:
-            return self._parse_text(text, requests)
-        except InvalidResponseError:
-            if len(requests) <= 1:
-                raise
-            # Same graceful degradation as the generic transport: one bad
-            # batch never loses the entries that would translate alone.
-            results: list[TranslationResult] = []
-            for req in requests:
-                results.extend(self._parse_text(self._post_chat(build_messages([req])), [req]))
-                self.last_fallback_calls += 1
-            return results
+        from almurrib.providers.batch_json import batch_or_fallback
+
+        results, fallback_calls = batch_or_fallback(
+            lambda: self._post_chat(build_messages(requests)),
+            lambda req: self._post_chat(build_messages([req])),
+            self._parse_text,
+            requests,
+        )
+        self.last_fallback_calls = fallback_calls
+        return results
 
     def _parse_text(
         self, text: str, requests: list[TranslationRequest]

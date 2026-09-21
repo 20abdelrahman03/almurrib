@@ -21,12 +21,14 @@ SOURCE_LIVE = "live"
 SOURCE_MODELS_DEV = "models.dev"
 SOURCE_LITELLM = "litellm"
 SOURCE_STATIC = "static"
+SOURCE_LOCAL = "local"
 
 SOURCE_BADGES = {
     SOURCE_LIVE: "Live provider API",
     SOURCE_MODELS_DEV: "Models.dev",
     SOURCE_LITELLM: "LiteLLM catalog",
     SOURCE_STATIC: "Static fallback",
+    SOURCE_LOCAL: "Local models",
 }
 
 

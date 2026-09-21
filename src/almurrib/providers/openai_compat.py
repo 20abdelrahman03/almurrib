@@ -107,23 +107,17 @@ class OpenAICompatibleProvider:
             # The prompt still demands strict JSON, so parsing is unchanged.
             structured = False
             body = self._post_json(self._payload(requests, structured=False))
-        try:
-            return self._parse_response(body, requests)
-        except InvalidResponseError:
-            if len(requests) <= 1:
-                raise
-            # Some models (e.g. pure text completion models) ignore
-            # response_format and won't return the strict batch JSON object.
-            # Degrade gracefully: translate each entry individually so one
-            # malformed batch does not fail the whole batch.
-            results: list[TranslationResult] = []
-            for req in requests:
-                single_body = self._post_json(
-                    self._payload([req], structured=structured)
-                )
-                self.last_fallback_calls += 1
-                results.extend(self._parse_response(single_body, [req]))
-            return results
+
+        from almurrib.providers.batch_json import batch_or_fallback
+
+        results, fallback_calls = batch_or_fallback(
+            lambda: body,
+            lambda req: self._post_json(self._payload([req], structured=structured)),
+            self._parse_response,
+            requests,
+        )
+        self.last_fallback_calls = fallback_calls
+        return results
 
 
     # -- HTTP with bounded retry -------------------------------------------

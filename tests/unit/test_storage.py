@@ -177,6 +177,51 @@ def test_clear_translations_resets_but_preserves_obsolete(tmp_path):
         assert repo.clear_translations(project.id) == (0, set())
 
 
+def test_same_content_across_projects_stays_independent(tmp_path):
+    """Identical (path, line, text) in two games: separate rows, states."""
+    with Database(tmp_path / "test.db") as db:
+        repo = EntryRepository(db)
+        project_a = repo.ensure_project("A", "/games/a", EngineType.RENPY)
+        project_b = repo.ensure_project("B", "/games/b", EngineType.RENPY)
+
+        repo.upsert_many(project_a.id, [_entry("Hello!", 9)])
+        repo.upsert_many(project_b.id, [_entry("Hello!", 9)])
+        assert repo.count(project_a.id) == 1
+        assert repo.count(project_b.id) == 1
+
+        translated = _entry("Hello!", 9)
+        translated.translated_text = "مرحباً!"
+        translated.status = EntryStatus.TRANSLATED
+        repo.upsert(project_a.id, translated)
+
+        assert repo.get(translated.id, project_a.id).translated_text == "مرحباً!"
+        assert repo.get(translated.id, project_b.id).translated_text is None
+        assert repo.get(translated.id, project_b.id).status is EntryStatus.UNTRANSLATED
+
+        # Re-extracting B never adopts or disturbs A's translation.
+        repo.upsert_many(project_b.id, [_entry("Hello!", 9)])
+        assert repo.get(translated.id, project_a.id).translated_text == "مرحباً!"
+
+
+def test_migration_preserves_provenance_columns(tmp_path):
+    """v4 rebuild keeps all 18 columns aligned (v2 appended after updated_at)."""
+    with Database(tmp_path / "test.db") as db:
+        assert db.schema_version() == 4
+        repo = EntryRepository(db)
+        project = repo.ensure_project("demo", "/games/demo", EngineType.RENPY)
+        entry = _entry("Hello!", 9)
+        entry.translated_text = "مرحباً!"
+        entry.status = EntryStatus.TRANSLATED
+        entry.translation_provider = "openai_compat"
+        entry.translation_model = "m"
+        entry.translation_source = "human"
+        repo.upsert(project.id, entry)
+        loaded = repo.get(entry.id, project.id)
+        assert (loaded.translated_text, loaded.translation_provider,
+                loaded.translation_model, loaded.translation_source) == \
+            ("مرحباً!", "openai_compat", "m", "human")
+
+
 def test_get_project_lookup(tmp_path):
     with Database(tmp_path / "test.db") as db:
         repo = EntryRepository(db)

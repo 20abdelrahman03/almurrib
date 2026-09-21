@@ -27,7 +27,7 @@
 ✅ GUI: provider/model discovery, force checkbox, output picker, log tools
 ✅ Offline test suite passes (live API + discovery tests opt-in via
    ALMURRIB_RUN_LIVE_TESTS=1)
-✅ Real-game validated on Ren'Py's official demo "The Question" (75 entries)
+✅ Real-game validated on Ren'Py's official demo "The Question" (77 entries)
 ```
 
 ## Real-game validation
@@ -39,12 +39,12 @@ fixture (see `fixtures/the_question/ATTRIBUTION.md`).
 Verified end-to-end (offline, deterministic fake provider):
 
 ```text
-The Question (75 entries: 40 speaker dialogue, 31 narrator, 4 menu)
+The Question (77 entries: 40 speaker dialogue, 31 narrator, 4 menu, 2 character names)
   → detect (renpy, confidence 0.90)
-  → extract (75 normalized entries, speakers Sylvie/Me resolved)
-  → translate (75 translated, 0 failed — via RealTranslateStage)
-  → export (game/tl/arabic/strings.rpy, 75 old/new pairs)
-  → re-parse of the generated file returns all 75 pairs (loads cleanly)
+  → extract (77 normalized entries, speakers Sylvie/Me resolved, names extracted)
+  → translate (77 translated, 0 failed — via RealTranslateStage)
+  → export (game/tl/arabic/strings.rpy, 77 old/new pairs)
+  → re-parse of the generated file returns all 77 pairs (loads cleanly)
   → original game/script.rpy byte-for-byte unchanged
 ```
 
@@ -59,10 +59,11 @@ almurrib localize <game_dir> --out patch\
 
 ## ⚠️ Honest limitations
 
-* The generated `strings.rpy` is syntactically valid and re-parseable by
-  our own parser, but **has not been loaded inside the Ren'Py engine
-  itself** in this environment (no Ren'Py runtime installed). Loading it in
-  a real game and confirming Arabic rendering is the remaining manual step.
+* The generated `strings.rpy` is syntactically valid, re-parseable by
+  our own parser, **and VERIFIED loading inside the real Ren'Py 8.5.3
+  engine on 2026-09-21**: the isolated `the_question_ar_test` copy renders
+  Arabic dialogue, menu choices and character nameplates in-game (77 pairs,
+  Vazirmatn font, native `ar` language button — user-verified).
 * Live API translation is implemented and unit-tested with a mocked HTTP
   layer; the `tests/live/` path requires a user-supplied key and was not
   exercised here (no key available in this environment).

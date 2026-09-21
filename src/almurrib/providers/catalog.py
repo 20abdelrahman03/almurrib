@@ -31,6 +31,7 @@ from almurrib.core.errors import (
 from almurrib.providers.discovery import (
     SOURCE_LITELLM,
     SOURCE_LIVE,
+    SOURCE_LOCAL,
     SOURCE_MODELS_DEV,
     SOURCE_STATIC,
     ModelInfo,
@@ -66,6 +67,13 @@ class RefreshResult:
 
 
 def _get_json(url: str, *, timeout_seconds: float) -> dict:
+    from almurrib.core.errors import (
+        AuthenticationError,
+        ProviderTimeoutError,
+        RateLimitError,
+    )
+    from almurrib.providers.openai_compat import _extract_error_message
+
     request = urllib.request.Request(
         url, headers={"User-Agent": "almurrib", "Accept": "application/json"},
         method="GET",
@@ -79,11 +87,30 @@ def _get_json(url: str, *, timeout_seconds: float) -> dict:
                     f"catalog response was not valid JSON: {exc}"
                 ) from exc
     except TimeoutError as exc:
-        from almurrib.core.errors import ProviderTimeoutError
-
         raise ProviderTimeoutError(f"catalog request timed out: {exc}") from exc
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        message = _extract_error_message(raw)
+        detail = message or raw[:200]
+        if exc.code in (401, 403):
+            raise AuthenticationError(
+                f"catalog rejected credentials (HTTP {exc.code})"
+                + (f": {detail}" if detail else ""),
+                http_status=exc.code, provider_message=message) from exc
+        if exc.code == 429:
+            raise RateLimitError(
+                f"catalog rate limited (HTTP 429)"
+                + (f": {detail}" if detail else ""),
+                http_status=exc.code, provider_message=message) from exc
+        raise ProviderError(
+            f"catalog request failed (HTTP {exc.code})"
+            + (f": {detail}" if detail else ""),
+            http_status=exc.code, provider_message=message) from exc
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", exc)
+        if isinstance(reason, TimeoutError):
+            raise ProviderTimeoutError(
+                f"catalog request timed out: {reason}") from exc
         raise ProviderError(f"catalog network error: {reason}") from exc
     if not isinstance(body, dict):
         raise InvalidResponseError("catalog response JSON was not an object")
@@ -94,6 +121,8 @@ def _pricing(pricing: dict, *keys: str) -> dict[str, float]:
     out: dict[str, float] = {}
     for key in keys:
         value = pricing.get(key)
+        if isinstance(value, bool):
+            continue  # bools are ints in Python; never prices
         if isinstance(value, (int, float)):
             out[key] = float(value)
     return out
@@ -220,7 +249,18 @@ def refresh_models(
     finally the static fallback, carrying the first error along.
     """
     first_error: str | None = None
-    if definition.discovery != "none":
+    if definition.discovery == "argos":
+        # Installed local models are authoritative for availability.
+        from almurrib.providers.argos import installed_models
+
+        try:
+            models = installed_models()
+            if models:
+                return RefreshResult(models=models, source=SOURCE_LOCAL)
+            first_error = "no Argos models installed"
+        except Exception as exc:
+            first_error = str(exc)
+    elif definition.discovery != "none":
         try:
             models = fetch_models(
                 base_url=base_url,
@@ -229,6 +269,12 @@ def refresh_models(
                 discovery=definition.discovery,
                 timeout_seconds=timeout_seconds,
             )
+            if not models:
+                # An empty catalog is degenerate (auth worked, nothing
+                # listed): treat like a failure so external sources still
+                # get consulted instead of presenting an empty dropdown.
+                raise InvalidResponseError(
+                    "provider model list came back empty")
             return RefreshResult(models=_with_provider(models, definition.id),
                                  source=SOURCE_LIVE)
         except AuthenticationError:

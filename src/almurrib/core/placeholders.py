@@ -41,15 +41,29 @@ class PlaceholderReport:
         return not self.missing
 
 
-def extract_placeholders(text: str) -> list[str]:
-    """Return the protected tokens found in ``text`` (order-preserving, deduped)."""
+from functools import lru_cache
+
+
+@lru_cache(maxsize=8192)
+def _extract_cached(text: str) -> tuple[str, ...]:
     found: list[str] = []
     for pattern in _TOKEN_PATTERNS:
         for match in pattern.finditer(text):
             token = match.group(0)
             if token not in found:
                 found.append(token)
-    return found
+    return tuple(found)
+
+
+def extract_placeholders(text: str) -> list[str]:
+    """Return the protected tokens found in ``text`` (order-preserving, deduped).
+
+    Backed by a bounded cache: translation runs extract the same source
+    texts repeatedly (QA rules, prompts, masking), and extraction is pure.
+    A fresh list is returned every call so callers can never mutate the
+    cached tuple.
+    """
+    return list(_extract_cached(text))
 
 
 def validate_translation(source_text: str, translated_text: str) -> PlaceholderReport:

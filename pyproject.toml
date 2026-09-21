@@ -20,13 +20,24 @@ classifiers = [
     "Topic :: Games/Entertainment",
     "Topic :: Text Processing :: Linguistic",
 ]
-# Runtime is intentionally dependency-free (stdlib only). External tools
-# (llama.cpp, engine unpackers, ...) will be integrated via adapters later.
-dependencies = []
+# Runtime is near-stdlib: only two small pure-Python Unicode libraries for
+# the Arabic layer (both license-compatible with AGPL-3.0; see
+# THIRD_PARTY_NOTICES.md). Everything else stays stdlib-only.
+dependencies = [
+    "arabic-reshaper==3.0.1",
+    "python-bidi==0.6.11",
+    "fonttools==4.65.0",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pyinstaller>=6"]
 gui = []  # Tkinter ships with CPython on Windows; nothing extra to install
+# Heavy compiled stack (UnityPy pulls lz4/Pillow/texture tools): install
+# only for Unity work. Detection works without it; extraction explains.
+unity = ["UnityPy==1.25.3"]
+# True offline translation (torch/ctranslate2 stack, ~500MB): install only
+# for local-first runs without any API key. Default install and EXE stay out.
+offline = ["argostranslate==1.11.0"]
 
 [project.scripts]
 almurrib = "almurrib.cli.main:main"

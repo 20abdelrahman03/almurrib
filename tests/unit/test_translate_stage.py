@@ -27,7 +27,10 @@ def test_translates_pending_entries_only():
     assert stats.already_translated == 1
     assert stats.api_translated == 1
     assert entries[0].translated_text == "<ar>A</ar>"
-    assert entries[0].status is EntryStatus.TRANSLATED
+    # Fake output holds no Arabic script, so Arabic QA honestly flags it
+    # (plumbing intact: text persisted, counted, exportable).
+    assert entries[0].status is EntryStatus.FLAGGED
+    assert any(f.startswith("no_arabic_script:") for f in entries[0].qa_flags)
     assert entries[1].translated_text == "موجود مسبقًا"  # untouched
 
 
@@ -54,6 +57,39 @@ def test_cache_saved_after_api_call():
     entry = _entry("Hello", 1)
     stage.run([entry], target_lang="ar")
     assert cache.lookup(_entry("Hello", 1)).translated_text == "<ar>Hello</ar>"
+
+
+def test_cache_stores_normalized_text_identical_to_entry():
+    """Cache hits must serve exactly what entries carry (no NFC drift)."""
+
+    class NfdProvider(FakeProvider):
+        def translate_batch(self, requests):
+            import unicodedata
+
+            results = super().translate_batch(requests)
+            for res in results:
+                # é decomposed: NFD bytes differ from the NFC entry text.
+                res.translated_text = unicodedata.normalize(
+                    "NFD", "café مرحبا")
+            return results
+
+    import unicodedata
+
+    from almurrib.arabic.normalize import normalize_text
+
+    # Premise check: this string genuinely differs between NFC and NFD,
+    # otherwise the test below would prove nothing.
+    assert unicodedata.normalize("NFD", "café مرحبا").encode() != \
+        unicodedata.normalize("NFC", "café مرحبا").encode()
+    provider = NfdProvider()
+    cache = TranslationCache(target_lang="ar", provider=provider.config.identity)
+    stage = RealTranslateStage(provider, cache=cache)
+    entry = _entry("Hello", 1)
+    stage.run([entry], target_lang="ar")
+    cached = cache.lookup(_entry("Hello", 1))
+    assert cached is not None
+    assert cached.translated_text == entry.translated_text
+    assert cached.translated_text == normalize_text(cached.translated_text)
 
 
 def test_translation_memory_reuse():

@@ -1,6 +1,6 @@
 """Cohere v2 end-to-end (mocked transport, no key, no network).
 
-Replays the exact user scenario that failed on v1 (75-entry game,
+Replays the exact user scenario that failed on v1 (77-entry game,
 command-a-plus-05-2026): translate the whole fixture through the v2 wire
 shape, validate, persist and export — proving the migration works.
 """
@@ -72,10 +72,10 @@ def test_cohere_v2_full_game_e2e(tmp_path, monkeypatch):
     pipeline = LocalizationPipeline(adapters=default_adapters())
     with Database(tmp_path / "e2e.db") as db:
         entries, project_id = extract_and_store(pipeline, game, db)
-        assert len(entries) == 75
+        assert len(entries) == 77
         stats = translate_entries(entries, db, provider, project_id=project_id)
         assert stats.failed == 0
-        assert stats.api_translated == 75
+        assert stats.api_translated == 77
         assert stats.placeholder_failures == 0
         assert provider.last_fallback_calls == 0  # clean v2 batches, no fan-out
         out = tmp_path / "patch"
@@ -84,5 +84,5 @@ def test_cohere_v2_full_game_e2e(tmp_path, monkeypatch):
     assert written
     content = (out / "game" / "tl" / "ar" / "strings.rpy").read_text(
         encoding="utf-8")
-    assert content.count('old "') == 75
+    assert content.count('old "') == 77
     assert calls and all(u.endswith("/v2/chat") for u in calls)

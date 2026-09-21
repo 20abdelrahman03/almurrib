@@ -7,15 +7,13 @@ translate it (locally first, cloud optional with BYO key), validate the
 result, process Arabic correctly (reshaping, BiDi, fonts), and put the
 translation back into the game.
 
-> **Status: Phase 1 stable.** The repository contains the hardened Ren'Py
-> localization pipeline: detection → extraction → normalized entries →
-> provider-registry translation (BYO key, 20+ providers, model discovery)
-> → provenance-aware cache + translation memory → placeholder validation →
-> deduplicated Ren'Py translation files. See
-> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design,
-> [docs/PROVIDERS.md](docs/PROVIDERS.md) for the provider ecosystem, and
-> [docs/PHASE1_STATUS.md](docs/PHASE1_STATUS.md) for what is tested and
-> the honest limitations.
+> **Status: multi-engine platform (Phase 3).** Detection → extraction →
+> glossary + translation (cloud BYO-key, offline Argos, or local models) →
+> Arabic QA → per-engine patch (Ren'Py, RPG Maker MV/MZ, Unity) with
+> originals untouched. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
+> [docs/ENGINE_SUPPORT.md](docs/ENGINE_SUPPORT.md) (honest capability
+> matrix), [docs/PROVIDERS.md](docs/PROVIDERS.md) and
+> [docs/PHASE3_ARCHITECTURE.md](docs/PHASE3_ARCHITECTURE.md).
 
 ## Why an ecosystem, not a tool
 
@@ -29,12 +27,14 @@ are integrated through adapters, never forked into the core.
 ## What works today
 
 ```text
-Ren'Py game → detect → extract → normalize → translate (API, BYO key)
-            → provider/model cache + provenance-gated TM → placeholder validation
-            → generate game/tl/<lang>/strings.rpy patch (originals untouched)
+Game → detect (Ren'Py / RPG Maker / Unity) → extract → glossary + translate
+       (cloud, offline Argos, or local llama.cpp) → Arabic QA
+       → engine patch: strings.rpy / translated JSON / rebuilt assets
+       (originals untouched)
 ```
 
-Validated end-to-end on Ren'Py's official demo "The Question" (75 entries).
+Validated end-to-end on Ren'Py's official demo "The Question" (77 entries)
+and the RPG Maker MV fixture (32 entries); Unity on synthetic layout.
 
 ## Providers
 
@@ -49,7 +49,8 @@ the verified compatibility matrix.
 ## Quick start
 
 ```powershell
-# Python 3.11+ required. Runtime is stdlib-only; pytest is the only dev dep.
+# Python 3.11+ required. Runtime is near-stdlib (Unicode libs only);
+# heavy stacks are optional extras: .[unity] (UnityPy), .[offline] (Argos).
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[dev]"
 
@@ -97,6 +98,8 @@ src/almurrib/
   core/            normalized model (+provenance), pipeline, cache, providers,
                    placeholders, config, translation stage, workflow,
                    shared error reporting (engine-agnostic)
+  arabic/          Arabic layer: normalize, masking, reshape, BiDi, wrap,
+                   fonts, structured QA (canonical logical text always kept)
   engine_adapters/ engine-specific code (renpy/: parser, adapter, reinjection)
   providers/       registry + discovery + generic OpenAI transport + Cohere
                    native adapter + fake (tests) + factory

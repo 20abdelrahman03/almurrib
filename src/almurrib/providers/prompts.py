@@ -21,7 +21,8 @@ _SYSTEM = (
     "translate, rename, reorder-remove, or alter them.\n"
     "3. Never translate identifiers, code, file names or tags.\n"
     "4. Respect the speaker and context when supplied (tone, gender, register).\n"
-    "5. Output STRICT JSON only: an object mapping each id to its translation. "
+    "5. When glossary translations are supplied, use them for those terms.\n"
+    "6. Output STRICT JSON only: an object mapping each id to its translation. "
     "No markdown, no code fences, no extra keys."
 )
 
@@ -43,11 +44,19 @@ def build_messages(requests: list[TranslationRequest]) -> list[dict[str, str]]:
     for req in requests:
         parts = [f'id: {req.entry_id}', f'text: {req.source_text}']
         if req.speaker:
-            parts.append(f"speaker: {req.speaker}")
+            who = req.speaker
+            traits = ", ".join(t for t in (req.speaker_gender, req.speaker_style)
+                               if t)
+            if traits:
+                who += f" ({traits})"
+            parts.append(f"speaker: {who}")
         if req.context:
             parts.append(f"context: {req.context}")
         if req.placeholders:
             parts.append("placeholders (preserve exactly): " + ", ".join(req.placeholders))
+        if req.glossary_terms:
+            pairs = "; ".join(f"{src} -> {tgt}" for src, tgt in req.glossary_terms)
+            parts.append("glossary (use these translations): " + pairs)
         lines.append(" | ".join(parts))
 
     system = _SYSTEM.replace("@@SOURCE_LANG@@", source_lang).replace(

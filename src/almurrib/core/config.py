@@ -79,6 +79,7 @@ class Settings:
     database_path: Path
     output_dir: Path
     reuse_machine_tm: bool
+    ui_lang: str  # "en" (LTR) | "ar" (RTL)
 
     def provider_config(self) -> ProviderConfig:
         if not self.api_key:
@@ -161,6 +162,10 @@ def load_settings(
             return default
         return raw in ("1", "true", "yes", "on")
 
+    ui_lang = get("UI_LANG", "en").strip().lower()
+    if ui_lang not in ("en", "ar"):
+        ui_lang = "en"
+
     return Settings(
         provider=get("PROVIDER", DEFAULT_PROVIDER),
         base_url=get("BASE_URL", DEFAULT_BASE_URL),
@@ -174,4 +179,5 @@ def load_settings(
         database_path=Path(get("DATABASE", "almurrib.db")),
         output_dir=Path(get("OUTPUT_DIR", "out")),
         reuse_machine_tm=get_bool("REUSE_MACHINE_TM", False),
+        ui_lang=ui_lang,
     )

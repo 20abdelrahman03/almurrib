@@ -21,36 +21,82 @@ these into the normalized model.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from almurrib.core.errors import ExtractionError
+from almurrib.engine_adapters.raw import RawStatement
+
+# Quoted-string body that understands backslash escapes: an escaped pair
+# (\" \\ \n ...) never terminates the string. Extracted text is then fully
+# unescaped so entries hold RUNTIME values (what Ren'Py matches at display
+# time) instead of source-literal backslashes.
+_ESCAPED_BODY = r"(?P<text>(?:\\.|(?!(?P=quote)).)*)"
 
 # Character definition: define e = Character("Eileen")
 # Also handles translatable display names: define s = Character(_("Sylvie"), ...)
 DEFINE_CHARACTER_RE = re.compile(
-    r"""^\s*define\s+(?P<var>[A-Za-z_]\w*)\s*=\s*Character\(\s*(?:_\(\s*)?(?P<quote>["'])(?P<name>.*?)(?P=quote)"""
+    r"""^\s*define\s+(?P<var>[A-Za-z_]\w*)\s*=\s*Character\(\s*(?P<marked>_\(\s*)?(?P<quote>["'])"""
+    + _ESCAPED_BODY.replace("(?P<text>", "(?P<name>", 1) +
+    r"""(?P=quote)"""
 )
 
 # Say statement with a speaker: e "Hello."  /  e 'Hello.'
 SAY_WITH_SPEAKER_RE = re.compile(
-    r"""^\s*(?P<speaker>[A-Za-z_]\w*)\s+(?P<quote>["'])(?P<text>.*?)(?P=quote)\s*(?:#.*)?$"""
+    r"""^\s*(?P<speaker>[A-Za-z_]\w*)\s+(?P<quote>["'])"""
+    + _ESCAPED_BODY +
+    r"""(?P=quote)\s*(?:#.*)?$"""
 )
 
 # Narrator say statement: "The wind blows."
 SAY_NARRATOR_RE = re.compile(
-    r"""^\s*(?P<quote>["'])(?P<text>.*?)(?P=quote)\s*(?:#.*)?$"""
+    r"""^\s*(?P<quote>["'])""" + _ESCAPED_BODY + r"""(?P=quote)\s*(?:#.*)?$"""
 )
 
 # Menu choice: "Yes, I do":   (only when we are inside a menu block)
 MENU_CHOICE_RE = re.compile(
-    r"""^\s*(?P<quote>["'])(?P<text>.*?)(?P=quote)\s*:\s*(?:#.*)?$"""
+    r"""^\s*(?P<quote>["'])""" + _ESCAPED_BODY + r"""(?P=quote)\s*:\s*(?:#.*)?$"""
 )
 
 MENU_RE = re.compile(r"^\s*menu\s*(?:[A-Za-z_]\w*)?\s*:\s*(?:#.*)?$")
 TRANSLATE_STRINGS_RE = re.compile(r"^\s*translate\s+\w+\s+strings\s*:\s*(?:#.*)?$")
-OLD_RE = re.compile(r"""^\s*old\s+(?P<quote>["'])(?P<text>.*?)(?P=quote)\s*(?:#.*)?$""")
-NEW_RE = re.compile(r"""^\s*new\s+(?P<quote>["'])(?P<text>.*?)(?P=quote)\s*(?:#.*)?$""")
+OLD_RE = re.compile(
+    r"""^\s*old\s+(?P<quote>["'])""" + _ESCAPED_BODY + r"""(?P=quote)\s*(?:#.*)?$""")
+NEW_RE = re.compile(
+    r"""^\s*new\s+(?P<quote>["'])""" + _ESCAPED_BODY + r"""(?P=quote)\s*(?:#.*)?$""")
+
+
+_SIMPLE_ESCAPES = {
+    "n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'",
+}
+_UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})")
+
+
+def unescape_renpy_string(raw: str) -> str:
+    """Resolve Ren'Py string escapes to runtime values.
+
+    ``\\"`` → ``"``, ``\\n`` → newline, ``\\uXXXX`` → char. Unknown escapes
+    keep their backslash (never silently drop content).
+    """
+    def replace_unicode(match: re.Match[str]) -> str:
+        code = match.group(1) or match.group(2)
+        try:
+            return chr(int(code, 16))
+        except (ValueError, OverflowError):
+            return match.group(0)
+
+    text = _UNICODE_ESCAPE_RE.sub(replace_unicode, raw)
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            out.append(_SIMPLE_ESCAPES.get(nxt, "\\" + nxt))
+            i += 2
+        else:
+            out.append(char)
+            i += 1
+    return "".join(out)
 
 # Lines that look like code or statements we intentionally ignore, so we
 # don't mistake their string literals for translatable dialogue.
@@ -61,20 +107,6 @@ IGNORED_PREFIXES = (
     "elif", "else", "while", "for", "pass", "with", "pause", "window",
     "nvl", "translate", "old", "new",
 )
-
-
-@dataclass
-class RawStatement:
-    """One raw extracted statement before normalization."""
-
-    kind: str  # "say" | "menu_choice" | "translated_string"
-    text: str
-    file: str  # path relative to game root, POSIX style
-    line: int  # 1-based
-    speaker: str | None = None  # display name when resolved, else variable
-    speaker_var: str | None = None  # raw character variable, e.g. "e"
-    translation: str | None = None  # `new` text for translate-strings pairs
-    extra: dict[str, str] = field(default_factory=dict)
 
 
 def _indent(line: str) -> int:
@@ -124,7 +156,20 @@ def parse_rpy(path: Path, *, game_root: Path) -> list[RawStatement]:
         # --- character definitions --------------------------------------
         m = DEFINE_CHARACTER_RE.match(line)
         if m:
-            characters[m.group("var")] = m.group("name")
+            name = unescape_renpy_string(m.group("name"))
+            characters[m.group("var")] = name
+            if m.group("marked"):
+                # _(...) explicitly marks the display name translatable:
+                # the nameplate itself becomes a localization entry.
+                statements.append(
+                    RawStatement(
+                        kind="character_name",
+                        text=name,
+                        file=rel,
+                        line=lineno,
+                        speaker_var=m.group("var"),
+                    )
+                )
             continue
 
         # --- translate <lang> strings blocks ----------------------------
@@ -136,7 +181,7 @@ def parse_rpy(path: Path, *, game_root: Path) -> list[RawStatement]:
         if in_translate_strings:
             m = OLD_RE.match(line)
             if m:
-                pending_old = (m.group("text"), lineno)
+                pending_old = (unescape_renpy_string(m.group("text")), lineno)
                 continue
             m = NEW_RE.match(line)
             if m and pending_old is not None:
@@ -144,7 +189,7 @@ def parse_rpy(path: Path, *, game_root: Path) -> list[RawStatement]:
                     RawStatement(
                         kind="translated_string",
                         text=pending_old[0],
-                        translation=m.group("text"),
+                        translation=unescape_renpy_string(m.group("text")),
                         file=rel,
                         line=pending_old[1],
                         extra={"new_line": str(lineno)},
@@ -163,7 +208,9 @@ def parse_rpy(path: Path, *, game_root: Path) -> list[RawStatement]:
             m = MENU_CHOICE_RE.match(line)
             if m:
                 statements.append(
-                    RawStatement(kind="menu_choice", text=m.group("text"), file=rel, line=lineno)
+                    RawStatement(kind="menu_choice",
+                                 text=unescape_renpy_string(m.group("text")),
+                                 file=rel, line=lineno)
                 )
                 continue
 
@@ -179,7 +226,7 @@ def parse_rpy(path: Path, *, game_root: Path) -> list[RawStatement]:
             statements.append(
                 RawStatement(
                     kind="say",
-                    text=m.group("text"),
+                    text=unescape_renpy_string(m.group("text")),
                     file=rel,
                     line=lineno,
                     speaker=characters.get(var, var),
@@ -190,7 +237,9 @@ def parse_rpy(path: Path, *, game_root: Path) -> list[RawStatement]:
         m = SAY_NARRATOR_RE.match(line)
         if m:
             statements.append(
-                RawStatement(kind="say", text=m.group("text"), file=rel, line=lineno, speaker=None)
+                RawStatement(kind="say",
+                             text=unescape_renpy_string(m.group("text")),
+                             file=rel, line=lineno, speaker=None)
             )
             continue
 

@@ -1,0 +1,188 @@
+"""XUnity runtime bundle generator (§16 of the milestone).
+
+Generates, from our stored translations, the files XUnity.AutoTranslator
+reads at game start — pure file-format interop, zero XUnity code copied:
+
+* ``Translation/ar/Text/Almurrib_ar.txt`` — ``ENCODED=ENCODED`` pairs in
+  the exact ``TextHelper`` escaping (ported from
+  ``Utilities/TextHelper.cs`` @ v5.6.2: ``\\`` → ``\\\\``, ``=`` →
+  ``\\=``, newlines → ``\\n``, ``//`` → ``\\/\\/``; UTF-8; one pair per
+  line; both sides must be non-empty).
+* ``Config.ini`` — manual-only offline lookup (``Endpoint=`` empty means
+  no auto-translation: our file is the dictionary; game base stays
+  English, Arabic comes from this bundle).
+
+Two upstream ``TextHelper`` quirks are mirrored byte-for-byte (never
+"fixed", or lookups would diverge from the plugin): literal ``//`` and
+``%3D`` in game text can never match at runtime (verified in source,
+property-tested). Both are vanishingly rare in dialogue.
+* ``README_Almurrib_AR.txt`` — install steps (user installs official
+  BepInEx + XUnity builds; LGPL-safe, nothing of ours inside theirs).
+
+TextAsset-redirector sheets (full translated XML blobs) are emitted as
+``RedirectedResources/<object>.txt`` as EXPERIMENTAL: XUnity's exact
+dump path must be confirmed from its own ``EnableDumping`` output.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from almurrib.core.model import EntryStatus, LocalizationEntry
+
+# XUnity ignores texts longer than this (MaxCharactersPerTranslation max).
+XUNITY_MAX_CHARS = 2500
+
+
+def xunity_encode(text: str) -> str:
+    """Port of XUnity ``TextHelper.EscapeNewlines`` (v5.6.2, MIT).
+
+    Any deviation breaks lookup silently (the plugin skips malformed
+    lines), so this is property-tested against a port of the C# decoder.
+    """
+    out: list[str] = []
+    i, length = 0, len(text)
+    while i < length:
+        char = text[i]
+        if char == "/" and i + 1 < length and text[i + 1] == "/":
+            out.append("\\/\\/")
+            i += 2
+        elif char == "\\":
+            out.append("\\\\")
+            i += 1
+        elif char == "=":
+            out.append("\\=")
+            i += 1
+        elif char == "\n":
+            out.append("\\n")
+            i += 1
+        elif char == "\r":
+            out.append("\\r")
+            i += 1
+        else:
+            out.append(char)
+            i += 1
+    return "".join(out)
+
+
+@dataclass
+class RuntimeBundle:
+    """Result of generating an XUnity runtime bundle."""
+
+    root: Path
+    pairs: int = 0
+    skipped_long: int = 0
+    skipped_empty: int = 0
+    duplicate_sources: int = 0
+    redirect_sheets: int = 0
+    files: list[str] = field(default_factory=list)
+
+
+def _usable(entry: LocalizationEntry) -> bool:
+    return bool(entry.translated_text) \
+        and entry.status is not EntryStatus.OBSOLETE
+
+
+def generate_xunity_bundle(entries: list[LocalizationEntry], dest: Path, *,
+                           lang: str = "ar",
+                           from_lang: str = "en") -> RuntimeBundle:
+    """Write an XUnity-compatible runtime bundle. Originals untouched."""
+    dest = Path(dest)
+    text_dir = dest / "Translation" / lang / "Text"
+    text_dir.mkdir(parents=True, exist_ok=True)
+    bundle = RuntimeBundle(root=dest)
+    seen: dict[str, str] = {}
+
+    for entry in entries:
+        if not _usable(entry):
+            bundle.skipped_empty += 1
+            continue
+        source = entry.source_text
+        translated = entry.translated_text or ""
+        if len(source) > XUNITY_MAX_CHARS or len(translated) > XUNITY_MAX_CHARS:
+            bundle.skipped_long += 1
+            continue
+        if source in seen:
+            bundle.duplicate_sources += 1
+        seen[source] = translated
+
+    lines = [f"{xunity_encode(k)}={xunity_encode(v)}"
+             for k, v in sorted(seen.items())]
+    bundle.pairs = len(lines)
+    pair_file = text_dir / f"Almurrib_{lang}.txt"
+    pair_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    bundle.files.append(pair_file.relative_to(dest).as_posix())
+
+    config = dest / "Config.ini"
+    config.write_text(_CONFIG_TEMPLATE.format(lang=lang, from_lang=from_lang),
+                      encoding="utf-8")
+    bundle.files.append("Config.ini")
+
+    readme = dest / "README_Almurrib_AR.txt"
+    readme.write_text(_README_TEMPLATE.format(lang=lang), encoding="utf-8")
+    bundle.files.append(readme.name)
+    return bundle
+
+
+def generate_redirect_sheets(entries: list[LocalizationEntry], dest: Path,
+                             blobs: dict[str, str]) -> int:
+    """Write translated full-sheet blobs for XUnity's TextAsset redirector.
+
+    ``blobs`` maps sheet object name -> translated full XML text (built by
+    applying per-element translations with
+    :func:`replace_sheet_elements`). EXPERIMENTAL: confirm XUnity's exact
+    dump path via its own ``EnableDumping`` output before use.
+    """
+    _ = entries  # provenance lives in the caller; blobs are the payload
+    redirect_dir = Path(dest) / "Translation" / "ar" / "RedirectedResources"
+    redirect_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for name, blob in sorted(blobs.items()):
+        safe = "".join(c if c.isalnum() or c in "-_." else "_"
+                       for c in name) or "sheet"
+        (redirect_dir / f"{safe}.txt").write_text(blob, encoding="utf-8")
+        count += 1
+    return count
+
+
+_CONFIG_TEMPLATE = """; Generated by Almurrib — manual-only Arabic lookup (offline).
+; Install: official BepInEx 5.4.23.5 + XUnity.AutoTranslator 5.6.2 into the
+; GAME'S WORKING COPY, copy this bundle's Translation/ dir next to the game
+; exe, launch once so Config.ini is picked up. No auto-translation runs:
+; Endpoint is empty, so ONLY the pairs in Translation/{lang}/Text/*.txt apply.
+; Game base stays English; Arabic comes from this bundle. ALT+R reloads files.
+
+[Service]
+Endpoint=
+
+[General]
+Language={lang}
+FromLanguage={from_lang}
+
+[TextFrameworks]
+EnableUGUI=True
+EnableUIElements=True
+EnableNGUI=True
+EnableTextMeshPro=True
+EnableTextMesh=False
+EnableIMGUI=False
+
+[Behaviour]
+EnableUIResizing=True
+"""
+
+_README_TEMPLATE = """Almurrib Arabic runtime bundle (XUnity file interop)
+===================================================
+1. Make a WORKING COPY of the game (never patch the original).
+2. Install BepInEx 5.4.23.5 (official win_x64 zip) into the copy.
+3. Install XUnity.AutoTranslator 5.6.2 BepInEx (or IL2CPP) zip there.
+4. Copy this bundle's Translation/ folder next to the game exe.
+5. Copy Config.ini next to it ONLY if no Config.ini exists yet
+   (otherwise merge the [Service]/[General]/[TextFrameworks] values).
+6. Launch, press ALT+R if you edit texts. ALT+T toggles Arabic/English.
+7. Fonts: if Arabic shows as boxes, set FallbackFontTextMeshPro (TMP) or
+   OverrideFont (UGUI) in Config.ini — see docs/UNITY_RUNTIME.md.
+
+Language: {lang}. Pairs are exact-match lookups of English source strings.
+"""

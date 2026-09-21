@@ -1,0 +1,24 @@
+body { font-family: "Segoe UI", Tahoma, sans-serif; background: #101418; color: #e8e8e8; margin: 0; }
+#app { max-width: 860px; margin: 0 auto; padding: 16px; }
+header h1 { font-size: 1.3em; margin: 0 0 8px; }
+#modebar { margin-bottom: 12px; }
+.modebtn { margin: 0 4px; padding: 6px 12px; cursor: pointer; }
+.modebtn.active { background: #2d6cdf; color: #fff; border: 1px solid #2d6cdf; }
+#overlay-badge { display: inline-block; margin-left: 8px; padding: 4px 8px;
+  background: #5a3d00; border: 1px solid #c98a00; font-size: 0.85em; }
+#overlay-badge[hidden] { display: none; }
+#start-screen, #stage { background: #1a2029; border: 1px solid #333; padding: 16px; margin-bottom: 12px; }
+#speaker { font-weight: bold; color: #8fd0ff; margin-bottom: 6px; min-height: 1.2em; }
+#text { font-size: 1.15em; line-height: 1.7; min-height: 3em; white-space: pre-wrap; }
+#text.ar { direction: rtl; text-align: right; }
+#choices { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+#choices button { text-align: left; padding: 8px; cursor: pointer; }
+#choices.ar button { direction: rtl; text-align: right; }
+#nav { margin-top: 12px; display: flex; gap: 12px; align-items: center; }
+#debug { background: #141a21; border: 1px dashed #444; padding: 12px; font-size: 0.85em; }
+#debug h2 { margin: 0 0 8px; font-size: 1em; }
+#debug dl { display: grid; grid-template-columns: 170px 1fr; gap: 4px 10px; margin: 0; }
+#debug dt { color: #9a9a9a; }
+#debug dd { margin: 0; word-break: break-word; }
+input { padding: 6px; }
+button { font-size: 1em; }

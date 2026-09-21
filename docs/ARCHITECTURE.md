@@ -35,18 +35,20 @@ exports, the cache, and SQLite unchanged.
 
 All SQL lives in `src/almurrib/storage/`. `Database` opens the file and
 applies ordered schema migrations (`schema_migrations` table; currently
-version 1). `EntryRepository` is the only code that reads/writes the
+version 4: provenance columns, glossary table, composite entry identity).
+`EntryRepository` is the only code that reads/writes the
 `localization_entries` table; the rest of the app speaks domain objects.
 Because entry ids are deterministic, `upsert` makes re-extraction
 idempotent, and the conflict clause preserves an existing translation when
-a fresh (untranslated) extraction of the same text arrives.
+a fresh (untranslated) extraction of the same text arrives. Entry identity
+is `(project_id, content-hash)`: identical text in two games never shares
+a row. Bulk upserts run in one transaction; databases use WAL mode.
 
 ## How the cache is keyed
 
 `make_cache_key()` hashes: engine + source_text + speaker + context +
-target language + provider. The provider defaults to `"identity"` (nothing
-translated yet); when llama.cpp/cloud providers land, their name+model join
-the key so results never collide across providers. `TranslationCache`
+target language + provider identity (`name:model`), so results never
+collide across providers. `TranslationCache`
 (in-memory, reference implementation) and `SQLiteCache` (persistent) share
 the same keying.
 
