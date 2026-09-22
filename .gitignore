@@ -7,6 +7,8 @@ build/
 dist/
 .pytest_cache/
 *.db
+*.db-shm
+*.db-wal
 out/
 uv_install.log
 pytest.log

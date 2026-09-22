@@ -144,14 +144,26 @@ class UnityPanel:
                 source_lang=app._source_code(),
                 strategy=self.strategy.get())
             with Database(app._db()) as db:
+                say = lambda m: self.win.after(0, self._say, m)
                 report = localize_unity_game(
                     Path(self.game_dir.get()), db=db, provider=provider,
                     options=options,
-                    progress=lambda m: self.win.after(0, self._say, m))
+                    progress=say, log=say)
             if report.workspace_root:
                 self._workspace = Path(report.workspace_root)
                 self.win.after(0, lambda: self.btn_launch.configure(
                     state="normal"))
+            from almurrib.core.translate import (
+                TranslationHealth,
+                render_health,
+            )
+
+            for line in render_health(TranslationHealth(
+                    provider=provider.config.provider,
+                    model=provider.config.model,
+                    total=report.extracted, accepted=report.translated,
+                    failed=report.failed)):
+                self.win.after(0, self._say, line)
             summary = (f"extracted={report.extracted} "
                        f"translated={report.translated} "
                        f"failed={report.failed} strategy={report.strategy}")

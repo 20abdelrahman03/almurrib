@@ -12,7 +12,14 @@ from pathlib import Path
 from almurrib.core.model import EntryStatus, LocalizationEntry
 from almurrib.core.pipeline import LocalizationPipeline, PipelineContext
 from almurrib.core.provider import TranslationProvider
-from almurrib.core.translate import RealTranslateStage, TMRecord, TranslationStats
+from almurrib.core.translate import (
+    PreflightEstimate,
+    RealTranslateStage,
+    TMRecord,
+    TranslationStats,
+    estimate_preflight,
+    run_canary,
+)
 from almurrib.storage.cache import SQLiteCache
 from almurrib.storage.database import Database
 from almurrib.storage.repository import EntryRepository, Project
@@ -120,7 +127,9 @@ def translate_entries(
     force: bool = False,
     reuse_machine_tm: bool = False,
     glossary: "Glossary | None | bool" = None,
-    progress=None,  # optional callable(done: int, total: int)
+    progress=None,  # optional callable(accepted: int, total: int)
+    log=None,  # optional callable(message: str) for milestone lines
+    canary: bool | None = None,  # None = auto for large jobs (>100 pending)
 ) -> TranslationStats:
     """Translate entries with TM + cache + provider, then persist.
 
@@ -147,6 +156,27 @@ def translate_entries(
         db, target_lang=target_lang, provider=provider.config.identity
     )
     memory = load_translation_memory(db)
+    # Canary gate (§3 of the incident): prove the provider on 3 entries
+    # before a large job spends tokens. Auto for >100 pending entries.
+    pending_probe = [e for e in entries
+                     if e.status is not EntryStatus.OBSOLETE
+                     and not e.translated_text]
+    if canary is None:
+        canary = len(pending_probe) > 100
+    if canary and pending_probe:
+        result = run_canary(
+            pending_probe, provider=provider, source_lang=source_lang,
+            target_lang=target_lang, glossary=glossary, log=log,
+            cache=cache)
+        if not result.passed:
+            from almurrib.core.errors import TranslationAbortedError
+
+            raise TranslationAbortedError(
+                f"canary FAILED ({result.accepted}/{result.tested} accepted) "
+                f"[{result.category}]: {result.error} — full run blocked "
+                "before spending tokens.",
+                hint="fix the provider/model/key, then re-run.",
+            )
     stage = RealTranslateStage(
         provider,
         cache=cache,
@@ -156,11 +186,47 @@ def translate_entries(
         glossary=glossary,
     )
     stats = stage.run(
-        entries, source_lang=source_lang, target_lang=target_lang, progress=progress
+        entries, source_lang=source_lang, target_lang=target_lang,
+        progress=progress, log=log,
     )
     if project_id is not None:
         EntryRepository(db).upsert_many(project_id, entries)
     return stats
+
+
+def dry_run_report(
+    entries: list[LocalizationEntry],
+    db: Database,
+    provider,
+    *,
+    source_lang: str = "en",
+    target_lang: str = "ar",
+    project_id: int | None = None,
+    log=None,
+) -> PreflightEstimate:
+    """Preflight without spending full-run tokens (§12 of the incident).
+
+    Reports counts + measured token estimate + runs the 3-entry canary
+    (the only calls spent). Never translates the project.
+    """
+    from almurrib.core.glossary import Glossary
+
+    from almurrib.storage.cache import SQLiteCache
+
+    glossary = load_glossary(db, project_id)
+    estimate = estimate_preflight(
+        entries, provider=provider, source_lang=source_lang,
+        target_lang=target_lang, glossary=glossary, log=log)
+    pending_probe = [e for e in entries
+                     if e.status is not EntryStatus.OBSOLETE
+                     and not e.translated_text]
+    cache = SQLiteCache(
+        db, target_lang=target_lang, provider=provider.config.identity)
+    estimate.canary = run_canary(
+        pending_probe, provider=provider, source_lang=source_lang,
+        target_lang=target_lang, glossary=glossary or Glossary(), log=log,
+        cache=cache)
+    return estimate
 
 
 def clear_project_translations(db: Database, project_id: int) -> int:

@@ -21,7 +21,7 @@ def test_detect_mv_fixture(tmp_path):
     assert "MV" in " ".join(result.reasons)
 
 
-def test_detect_rejects_unrelated(tmp_path):
+def test_rpgmaker_detect_rejects_unrelated(tmp_path):
     assert not RPGMakerAdapter().detect(tmp_path).is_match
 
 

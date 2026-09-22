@@ -1,4 +1,4 @@
-﻿"""Ren'Py reinjection: generate standard Ren'Py translation files.
+"""Ren'Py reinjection: generate standard Ren'Py translation files.
 
 Uses Ren'Py string-translation mechanism (``translate <lang> strings:``
 old/new pairs), which matches translations by *original text* and therefore

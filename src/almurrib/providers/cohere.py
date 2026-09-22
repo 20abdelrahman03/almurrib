@@ -39,6 +39,7 @@ from almurrib.core.provider import (
 from almurrib.providers.batch_json import parse_id_mapping
 from almurrib.providers.openai_compat import _extract_error_message
 from almurrib.providers.prompts import build_messages
+from almurrib.providers.usage import extract_usage
 
 
 class _VersionFallback(ProviderError):
@@ -82,6 +83,8 @@ class CohereProvider:
     def __init__(self, config: ProviderConfig) -> None:
         self._config = config
         self.last_fallback_calls: int = 0
+        self.last_http_status: int | None = None  # observability (never secrets)
+        self.last_usage: tuple[int, int] | None = None  # (in, out) or None
 
     @property
     def config(self) -> ProviderConfig:
@@ -171,7 +174,10 @@ class CohereProvider:
         for attempt in range(1, attempts + 1):
             try:
                 with urllib.request.urlopen(request, timeout=self._config.timeout_seconds) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+                    self.last_http_status = getattr(resp, "status", None)
+                    body = json.loads(resp.read().decode("utf-8"))
+                    self.last_usage = extract_usage(body)
+                    return body
             except urllib.error.HTTPError as exc:
                 raw = exc.read().decode("utf-8", errors="replace")
                 provider_message = _extract_error_message(raw) or _cohere_message(raw)

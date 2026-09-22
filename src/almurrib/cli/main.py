@@ -73,6 +73,9 @@ def _build_parser() -> argparse.ArgumentParser:
                              help="ignore skips/TM/cache; call the provider again")
     p_translate.add_argument("--reuse-machine-tm", action="store_true",
                              help="allow cross-model reuse of machine TM")
+    p_translate.add_argument("--dry-run", action="store_true",
+                             help="preflight only: counts, token estimate, "
+                                  "3-entry canary — never translates")
 
     p_export = sub.add_parser(
         "export", help="generate Ren'Py localization files from stored translations"
@@ -297,7 +300,11 @@ def _cmd_translate(args: argparse.Namespace) -> int:
     if getattr(args, "force", False):
         print("mode          : force (skipping TM/cache/already-translated)")
     with Database(settings.database_path) as db:
-        from almurrib.core.workflow import resolve_project, translate_entries
+        from almurrib.core.workflow import (
+            dry_run_report,
+            resolve_project,
+            translate_entries,
+        )
 
         repo = EntryRepository(db)
         project_id: int | None = None
@@ -311,11 +318,23 @@ def _cmd_translate(args: argparse.Namespace) -> int:
         if not entries:
             print("(no entries stored — run 'extract' first)")
             return 0
+        if getattr(args, "dry_run", False):
+            estimate = dry_run_report(
+                entries, db, provider,
+                source_lang=settings.source_lang,
+                target_lang=settings.target_lang,
+                project_id=project_id, log=print)
+            canary = estimate.canary
+            print(f"canary        : {'PASS' if canary and canary.passed else 'FAIL'} "
+                  f"({canary.accepted if canary else 0}/"
+                  f"{canary.tested if canary else 0} accepted)")
+            return 0 if canary and canary.passed else 2
         stats = translate_entries(
             entries, db, provider,
             source_lang=settings.source_lang, target_lang=settings.target_lang,
             force=getattr(args, "force", False),
             reuse_machine_tm=settings.reuse_machine_tm,
+            log=print,
         )
         if project_id is not None:
             repo.upsert_many(project_id, entries)
@@ -323,6 +342,10 @@ def _cmd_translate(args: argparse.Namespace) -> int:
             repo.upsert_for_entries(entries)
     print(f"entries       : {stats.total}")
     _print_stats(stats, secrets=[settings.api_key])
+    from almurrib.core.translate import health_snapshot, render_health
+
+    for line in render_health(health_snapshot(stats, provider=provider)):
+        print(line)
     if stats.failed:
         return _report_failure(provider, settings, stats)
     return 0

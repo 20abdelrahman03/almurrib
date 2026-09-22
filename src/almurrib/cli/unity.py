@@ -148,7 +148,7 @@ def _localize(args) -> int:
     with Database(settings.database_path) as db:
         report = localize_unity_game(
             args.game_dir, db=db, provider=provider, options=options,
-            progress=print)
+            progress=print, log=print)
     print(f"game id         : {report.game_id or 'n/a'}")
     print(f"unity           : {report.unity_version or 'unknown'} "
           f"/ {report.backend}")

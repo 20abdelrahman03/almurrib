@@ -108,6 +108,17 @@ class PlaceholderValidationError(TranslationError):
     stage = "translate.placeholders"
 
 
+class TranslationAbortedError(TranslationError):
+    """The run was stopped early: consecutive batches all failed.
+
+    A run that cannot succeed must not burn thousands of entries
+    (and API quota) to prove it — abort with the first cause attached.
+    Untouched entries stay untranslated and retryable.
+    """
+
+    stage = "translate"
+
+
 class ExportError(AlMurribError):
     """Raised when generating localization output files fails."""
 

@@ -70,7 +70,7 @@ class UnityLocalizeReport:
 
 def localize_unity_game(game_dir: Path, *, db, provider,
                         options: UnityLocalizeOptions | None = None,
-                        progress=None) -> UnityLocalizeReport:
+                        progress=None, log=None) -> UnityLocalizeReport:
     """Run the full Unity flow. See module docstring for the contract."""
     from almurrib.core.pipeline import LocalizationPipeline
     from almurrib.core.workflow import (
@@ -138,7 +138,8 @@ def localize_unity_game(game_dir: Path, *, db, provider,
     stats = translate_entries(
         entries, db, provider, source_lang=options.source_lang,
         target_lang=options.target_lang, project_id=project_id,
-        force=options.force, reuse_machine_tm=options.reuse_machine_tm)
+        force=options.force, reuse_machine_tm=options.reuse_machine_tm,
+        log=log)
     report.translated = (stats.api_translated + stats.memory_hits
                          + stats.cache_hits + stats.already_translated)
     report.failed = stats.failed

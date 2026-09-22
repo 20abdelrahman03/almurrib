@@ -26,8 +26,21 @@
 ## EXE behaves differently than source runs
 * The EXE reads `.env`/database/output next to itself; dev runs use the
   working directory. The GUI log prints the loaded config path at startup.
-* Unity/Argos extras are NOT in the EXE: use a desktop Python env with
-  `almurrib[unity]` / `almurrib[offline]`.
+* UnityPy ships INSIDE the EXE (one-click Unity needs zero installs).
+  Argos offline does NOT: use a desktop Python env with
+  `almurrib[offline]` for that.
+
+## Translation safety (canary, breaker, health)
+* Jobs over ~100 pending entries start with a **[CANARY]** gate: 3 entries
+  through the live provider. `FAIL` blocks the run before tokens burn.
+* The progress bar counts **accepted** translations only (parsed + valid +
+  QA-clean + staged). Requests/tokens/HTTP-200s never move it.
+* 5 straight batches with zero accepted output (or 50k output tokens with
+  zero accepted) **abort the run** with the first cause attached;
+  untouched entries stay retryable. Nothing is half-saved.
+* `translate --dry-run` prints counts, a measured token estimate and the
+  canary verdict without translating.
+* A rerun never resends cached successes (same provider/model).
 
 ## `force` vs `clear`
 * `--force`/checkbox: ignore skips and re-call the provider (provenance

@@ -1,4 +1,4 @@
-﻿"""CLI workflow tests: translate + export commands (offline)."""
+"""CLI workflow tests: translate + export commands (offline)."""
 
 from almurrib.cli.main import main
 from almurrib.providers.fake import FakeProvider

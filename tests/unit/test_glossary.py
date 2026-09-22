@@ -52,7 +52,7 @@ def test_entry_validation():
         GlossaryEntry(source_term="x", target_term="y", style="nope")
 
 
-def test_round_trip_serialization():
+def test_glossary_round_trip_serialization():
     entry = _glossary().entries[0]
     assert GlossaryEntry.from_dict(entry.to_dict()).to_dict() == entry.to_dict()
 

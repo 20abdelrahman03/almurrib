@@ -423,23 +423,25 @@ def test_output_defaults_anchored_to_app_base(tmp_path, monkeypatch):
 
 
 def test_translate_progress_callback_fires(renpy_fixture_dir, tmp_path):
-    """The translate stage reports real progress the GUI can bind to."""
+    """Progress reports ACCEPTED translations the GUI can bind to."""
     from almurrib.core.pipeline import LocalizationPipeline
     from almurrib.core.workflow import extract_and_store, translate_entries
     from almurrib.engine_adapters import default_adapters
-    from almurrib.providers.fake import FakeProvider
     from almurrib.storage.database import Database
+    from tests.conftest import ArabicStubProvider
 
     pipeline = LocalizationPipeline(adapters=default_adapters())
     ticks: list[tuple[int, int]] = []
     with Database(tmp_path / "g.db") as db:
         entries, project_id = extract_and_store(pipeline, renpy_fixture_dir, db)
-        translate_entries(
-            entries, db, FakeProvider(),
+        stats = translate_entries(
+            entries, db, ArabicStubProvider(),
             source_lang="en", target_lang="arabic",
             project_id=project_id,
             progress=lambda done, total: ticks.append((done, total)),
         )
+    assert stats.accepted == len(entries)
     assert ticks, "progress callback never fired"
-    assert ticks[-1][0] == ticks[-1][1]  # finished at total
+    assert ticks[-1] == (len(entries), len(entries))  # accepted == total
     assert all(d <= t for d, t in ticks)
+    assert [d for d, _ in ticks] == sorted(d for d, _ in ticks)  # monotonic

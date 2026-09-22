@@ -41,7 +41,7 @@ def test_detect_synthetic_game():
     assert any("UnityFS" in reason or "asset" in reason for reason in result.reasons)
 
 
-def test_detect_rejects_unrelated(tmp_path):
+def test_unity_detect_rejects_unrelated(tmp_path):
     assert not UnityAdapter().detect(tmp_path).is_match
 
 

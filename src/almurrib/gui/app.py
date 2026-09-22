@@ -954,7 +954,8 @@ class AlmurribApp:
                 target_lang=self._target_code(),
                 project_id=project_id,
                 reuse_machine_tm=self._run_settings(),
-                progress=self._progress_cb)
+                progress=self._progress_cb,
+                log=lambda m: self._queue.put(("info", m)))
             if stats.failed:
                 raise self._failure(stats)
             self._set_phase(self._t("exporting"))
@@ -1029,6 +1030,7 @@ class AlmurribApp:
                     force=force,
                     reuse_machine_tm=self._run_settings(),
                     progress=self._progress_cb,
+                    log=lambda m: self._queue.put(("info", m)),
                 )
             if stats.failed:
                 # Surface the real cause, then the summary.

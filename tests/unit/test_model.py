@@ -47,7 +47,7 @@ def test_fingerprint_ignores_location():
     assert moved.fingerprint == entry.fingerprint
 
 
-def test_round_trip_serialization():
+def test_entry_round_trip_serialization():
     entry = _sample_entry()
     restored = LocalizationEntry.from_dict(entry.to_dict())
     assert restored.to_dict() == entry.to_dict()

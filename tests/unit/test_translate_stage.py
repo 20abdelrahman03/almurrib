@@ -34,6 +34,73 @@ def test_translates_pending_entries_only():
     assert entries[1].translated_text == "موجود مسبقًا"  # untouched
 
 
+class _AlwaysFails:
+    """Provider stub whose every batch raises (regression fixture)."""
+
+    def __init__(self):
+        from almurrib.core.provider import ProviderConfig
+
+        self._config = ProviderConfig(
+            provider="broken", model="none",
+            base_url="http://localhost.invalid", api_key="x")
+
+    @property
+    def config(self):
+        return self._config
+
+    def capabilities(self):
+        from almurrib.core.provider import ProviderCapabilities
+
+        return ProviderCapabilities(supports_batch=True)
+
+    def translate_batch(self, requests):
+        from almurrib.core.errors import ProviderError
+
+        raise ProviderError("boom")
+
+
+def test_failed_chunks_never_fake_progress():
+    """Progress counts ACCEPTED only: total failure emits zero ticks."""
+    stage = RealTranslateStage(_AlwaysFails())
+    entries = [_entry(f"text {i}", i) for i in range(5)]
+    seen: list[tuple[int, int]] = []
+    lines: list[str] = []
+    stats = stage.run(entries, target_lang="ar",
+                      progress=lambda d, t: seen.append((d, t)),
+                      log=lines.append)
+    assert stats.failed == 5
+    assert stats.accepted == 0
+    assert seen == [], "failures must never move the accepted bar"
+    assert any("ZERO" in line for line in lines), "failure must ALERT in log"
+
+
+def test_circuit_breaker_aborts_runaway_failures():
+    """5 straight failed batches abort; later entries are never attempted."""
+    stage = RealTranslateStage(_AlwaysFails())
+    entries = [_entry(f"text {i}", i) for i in range(101)]
+    try:
+        stage.run(entries, target_lang="ar")
+    except Exception as exc:
+        from almurrib.core.errors import TranslationAbortedError
+
+        assert isinstance(exc, TranslationAbortedError)
+        assert "5 consecutive batches" in str(exc)
+        assert "zero accepted translations" in str(exc)
+        assert "100 failed" in str(exc)  # 5 chunks x 20; last entry untouched
+    else:
+        raise AssertionError("breaker did not trip")
+
+
+def test_circuit_breaker_resets_on_success():
+    """Intermittent failures (FakeProvider ok) never trip the breaker."""
+    provider = FakeProvider()
+    stage = RealTranslateStage(provider)
+    entries = [_entry(f"text {i}", i) for i in range(45)]
+    stats = stage.run(entries, target_lang="ar")
+    assert stats.api_translated + stats.memory_hits + stats.cache_hits == 45
+    assert stats.failed == 0
+
+
 def test_cache_hit_skips_api():
     provider = FakeProvider()
     cache = TranslationCache(target_lang="ar", provider=provider.config.identity)

@@ -90,7 +90,7 @@ provider's current official docs (Sept 2026). Anything else is marked
 | DeepSeek | OpenAI-compatible | `https://api.deepseek.com/v1` | yes | model-dependent | verified |
 | Groq | OpenAI-compatible | `https://api.groq.com/openai/v1` | yes | yes | verified |
 | DeepInfra | OpenAI-compatible | `https://api.deepinfra.com/v1/openai` | yes | model-dependent | verified |
-| Cohere | **native** (`POST /v1/chat`) | `https://api.cohere.com` | yes (`?endpoint=chat`, ctx + features) | model-dependent | verified |
+| Cohere | **native** (`POST /v2/chat`, v1 fallback) | `https://api.cohere.com` | yes (`?endpoint=chat`, ctx + features) | model-dependent | verified |
 | Ollama (local) | OpenAI-compatible | `http://localhost:11434/v1` | yes | yes | verified |
 | NVIDIA NIM (local) | OpenAI-compatible | `http://localhost:8000/v1` | yes | model-dependent | verified |
 | Gemini | OpenAI-compatible endpoint | `https://generativelanguage.googleapis.com/v1beta/openai` | yes | model-dependent | UNVERIFIED |
@@ -108,7 +108,8 @@ provider's current official docs (Sept 2026). Anything else is marked
 
 ## Transport behavior (all chat providers)
 
-* `POST {base_url}/chat/completions` (Cohere: `POST {base_url}/v1/chat`),
+* `POST {base_url}/chat/completions` (Cohere: `POST {base_url}/v2/chat`,
+  legacy models fall back to `/v1/chat`),
   `Authorization: Bearer <key>`, stdlib HTTP only.
 * `response_format: json_object` is sent unless the config says otherwise;
   a `400` refusing it triggers **one retry without it** (common on routers

@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from almurrib.providers.fake import FakeProvider
+
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "fixtures"
 
@@ -13,6 +15,18 @@ FIXTURES = ROOT / "fixtures"
 def renpy_fixture_dir() -> Path:
     """Path to the tiny deterministic Ren'Py fixture."""
     return FIXTURES / "renpy_tiny"
+
+
+class ArabicStubProvider(FakeProvider):
+    """FakeProvider whose output passes Arabic QA (TEST ONLY).
+
+    Keeps every placeholder token verbatim and adds real Arabic script,
+    so results are ACCEPTED (not FLAGGED) — the honest stand-in for a
+    working model in progress/health/persistence tests.
+    """
+
+    def _translate_text(self, req) -> str:  # noqa: N802 (matches base name)
+        return f"ترجمة عربية: {req.source_text}"
 
 
 def build_test_rpa_v3(files: dict[str, bytes], *, key: int = 0x12345678) -> bytes:
