@@ -131,4 +131,4 @@ AGPL-3.0 — deliberately, to keep the ecosystem open. See
 
 ## Documentation
 
-This section provides additional information about the project structure and local development workflow.
+This section provides additional information about the project structure and local development workflow
