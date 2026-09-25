@@ -11,6 +11,7 @@ rebuilds, no runtime hooks (all Phase 3+ or external-tool territory).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from almurrib.core.engine import DetectionResult
@@ -183,15 +184,33 @@ class UnityAdapter:
             return "sheet_entry" if path.startswith("entry[") else "text_asset"
         return "name" if path.endswith("m_Name") else "field"
 
-    @staticmethod
-    def _tags(found, field_path: str | None = None) -> list[str]:
+    # MonoBehaviour fields whose names signal UI-bound text (UGUI/TMP
+    # m_text, labels, captions...). Advisory PARTIAL coverage: the strings
+    # surface through generic typetree leaves; component-aware handling
+    # (font refs, loc tables) stays UNSUPPORTED and is reported as such.
+    _UI_FIELD_RE = re.compile(
+        r"text|caption|label|message|dialog|button|title|header|"
+        r"tooltip|description|subtitle", re.IGNORECASE)
+
+    @classmethod
+    def _ui_signal(cls, found, path: str) -> bool:
+        if found.class_name != "MonoBehaviour":
+            return False
+        haystack = f"{path} {(found.object_name or '')}"
+        return cls._UI_FIELD_RE.search(haystack) is not None
+
+    @classmethod
+    def _tags(cls, found, field_path: str | None = None) -> list[str]:
         path = field_path if field_path is not None else found.field_path
         if found.class_name == "TextAsset":
             return ["sheet", "entry"] if path.startswith("entry[") \
                 else ["text", "asset"]
         if path.endswith("m_Name"):
             return ["name"]
-        return ["field"]
+        tags = ["field"]
+        if cls._ui_signal(found, path):
+            tags.append("ui_text")
+        return tags
 
     @staticmethod
     def _find_assets(game_dir: Path) -> list[Path]:

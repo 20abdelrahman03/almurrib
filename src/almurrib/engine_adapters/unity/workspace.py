@@ -92,7 +92,16 @@ def prepare_workspace(game_dir: Path, dest: Path, *,
             f"not enough disk space (need ~{needed // 1024 // 1024}MB)",
             hint="free space or pick another destination drive.")
 
-    shutil.copytree(source, dest, copy_function=shutil.copy2)
+    try:
+        shutil.copytree(source, dest, copy_function=shutil.copy2)
+    except OSError as exc:
+        # Disk-full / permission / locked files surface as a clean,
+        # actionable error — never a bare traceback (§45).
+        raise ExportError(
+            f"cannot copy game into workspace: {exc}",
+            hint="check disk space, permissions and locked files, "
+                 "then retry.",
+        ) from exc
     files = {p.relative_to(dest).as_posix(): _hash_file(p)
              for p in sorted(dest.rglob("*")) if p.is_file()}
     manifest = {
@@ -109,6 +118,61 @@ def prepare_workspace(game_dir: Path, dest: Path, *,
     return Workspace(root=dest, source=source,
                      game_id=manifest["game_id"],
                      manifest_path=manifest_path, files=files)
+
+
+def resume_workspace(dest: Path, game_id: str) -> Workspace | None:
+    """Reuse a complete workspace from a killed run (§29 resume).
+
+    Returns the Workspace when the destination holds a manifest for the
+    SAME game with a complete file set; None otherwise (caller then
+    refuses as before). Never trusts a partial copy: the manifest is
+    written last, and the file count must match it.
+    """
+    dest = Path(dest).resolve()
+    try:
+        workspace = load_workspace(dest)
+    except ExportError:
+        return None
+    if workspace.game_id != game_id:
+        return None
+    try:
+        on_disk = sum(1 for _ in dest.rglob("*") if _.is_file())
+    except OSError:
+        return None
+    # Manifest itself + game files.
+    if on_disk < len(workspace.files):
+        return None
+    return workspace
+
+
+def load_workspace(root: Path) -> Workspace:
+    """Rebuild a Workspace handle from its manifest (§32 rollback).
+
+    Raises ExportError when the directory is not an Almurrib workspace.
+    """
+    root = Path(root).resolve()
+    manifest_path = root / "almurrib_workspace.json"
+    if not manifest_path.is_file():
+        raise ExportError(f"not an Almurrib workspace: '{root}'",
+                          hint="point at a *_ar_work directory.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return Workspace(root=root, source=Path(manifest["source"]),
+                     game_id=manifest["game_id"],
+                     manifest_path=manifest_path,
+                     files=manifest.get("files", {}))
+
+
+def rollback_workspace(root: Path) -> list[str]:
+    """One-action rollback (§32): verify originals, then discard the copy.
+
+    Returns warnings (non-empty means investigate before trusting).
+    Originals are verified FIRST so a surprising source change never
+    gets silently discarded.
+    """
+    workspace = load_workspace(root)
+    problems = verify_originals(workspace)
+    discard(workspace)
+    return problems
 
 
 def verify_originals(workspace: Workspace) -> list[str]:

@@ -42,6 +42,10 @@ class TranslationStats:
     # may use — never requests sent, tokens spent, or HTTP 200s.
     accepted: int = 0
     rejected: int = 0
+    # Dedup (§15): fingerprint groups among translatable entries, and
+    # the occurrences saved from repeat provider calls.
+    unique_groups: int = 0
+    duplicate_occurrences: int = 0
     requests: int = 0  # provider calls attempted (batches + fallback singles)
     retries: int = 0  # HTTP-level retries inside providers
     input_tokens: int = 0  # only when the provider reports usage
@@ -60,6 +64,7 @@ class TranslationStats:
     last_error: str | None = None
     last_category: str | None = None
     journal: list["BatchHealth"] = field(default_factory=list)  # capped
+    stopped: bool = False  # user stop (or pause-then-stop): partial, resumable
 
 
 @dataclass
@@ -254,6 +259,9 @@ class RealTranslateStage:
         target_lang: str = "ar",
         progress=None,  # optional callable(accepted: int, total: int)
         log=None,  # optional callable(message: str) for milestone lines
+        persist=None,  # optional callable(chunk_entries) per completed chunk
+        stop_event=None,  # duck-typed threading.Event: stop after this chunk
+        pause_event=None,  # duck-typed threading.Event: wait while set
     ) -> TranslationStats:
         # Obsolete entries vanished from source: never translate, never count,
         # so progress and totals stay exact across repeated runs.
@@ -269,6 +277,14 @@ class RealTranslateStage:
                 progress(stats.accepted, stats.total)
 
         identity = self.provider.config.identity
+        # Dedup (§15): group by fingerprint BEFORE any TM/cache/provider
+        # work, so one source string is resolved once and fanned out to
+        # every occurrence. Fingerprint already binds text+speaker+context,
+        # so §16 holds by construction: same source but conflicting
+        # context lands in different groups and is translated separately.
+        # Each entry keeps its OWN id/refs (write-back needs every
+        # occurrence); only text/status/flags/provenance are shared.
+        groups: dict[str, list[LocalizationEntry]] = {}
         for entry in entries:
             if entry.translated_text and not self.force:
                 stats.already_translated += 1
@@ -278,49 +294,84 @@ class RealTranslateStage:
                                target_lang=target_lang, stats=stats, reset=False)
                 count_accepted()
                 continue
+            groups.setdefault(entry.fingerprint, []).append(entry)
+        stats.unique_groups = len(groups)
+        stats.duplicate_occurrences = sum(len(m) - 1 for m in groups.values())
 
+        def fan_out(rep: LocalizationEntry,
+                    members: list[LocalizationEntry]) -> None:
+            """Share rep's resolved translation with same-fingerprint members.
+
+            QA runs ONCE (on rep — deterministic, so flags are identical);
+            members copy flags without touching QA counters. Progress and
+            hit counters fire per occurrence: each one is accepted work.
+            """
+            for sibling in members:
+                if sibling is rep:
+                    continue
+                sibling.translated_text = rep.translated_text
+                sibling.translation_source = rep.translation_source
+                sibling.translation_provider = rep.translation_provider
+                sibling.translation_model = rep.translation_model
+                sibling.status = rep.status
+                sibling.qa_flags = list(rep.qa_flags)
+
+        pending: list[LocalizationEntry] = []
+        fanout: dict[int, list[LocalizationEntry]] = {}
+        for members in groups.values():
+            rep = members[0]
+            fanout[id(rep)] = members
             # 1. translation memory (provenance-gated, skipped under force)
             if not self.force:
-                tm_hit = self.memory.lookup(entry)
+                tm_hit = self.memory.lookup(rep)
                 if tm_hit is not None and tm_reusable(
                     tm_hit,
                     current_identity=identity,
                     allow_cross_model_machine=self.reuse_machine_tm,
-                ) and not self._glossary_veto(entry, tm_hit.text):
-                    entry.translated_text = tm_hit.text
-                    entry.translation_source = tm_hit.source
-                    entry.translation_provider = (
+                ) and not self._glossary_veto(rep, tm_hit.text):
+                    rep.translated_text = tm_hit.text
+                    rep.translation_source = tm_hit.source
+                    rep.translation_provider = (
                         tm_hit.provider.split(":")[0] if tm_hit.provider else None
                     )
-                    entry.translation_model = tm_hit.model
-                    entry.status = EntryStatus.TRANSLATED
-                    self._apply_qa(entry, tm_hit.text,
+                    rep.translation_model = tm_hit.model
+                    rep.status = EntryStatus.TRANSLATED
+                    self._apply_qa(rep, tm_hit.text,
                                    target_lang=target_lang, stats=stats, reset=False)
-                    stats.memory_hits += 1
-                    count_accepted()
+                    fan_out(rep, members)
+                    for _ in members:
+                        stats.memory_hits += 1
+                        count_accepted()
                     continue
 
             # 2. cache (provider+model+lang specific, skipped under force)
+            resolved = False
             if self.cache is not None and not self.force:
-                record = self.cache.lookup(entry)
+                record = self.cache.lookup(rep)
                 if (record is not None and record.translated_text
-                        and not self._glossary_veto(entry, record.translated_text)):
-                    entry.translated_text = record.translated_text
-                    entry.status = EntryStatus.TRANSLATED
-                    self._apply_qa(entry, record.translated_text,
+                        and not self._glossary_veto(rep, record.translated_text)):
+                    rep.translated_text = record.translated_text
+                    rep.status = EntryStatus.TRANSLATED
+                    self._apply_qa(rep, record.translated_text,
                                    target_lang=target_lang, stats=stats, reset=False)
-                    stats.cache_hits += 1
-                    count_accepted()
-                    continue
+                    fan_out(rep, members)
+                    for _ in members:
+                        stats.cache_hits += 1
+                        count_accepted()
+                    resolved = True
+            if not resolved:
+                pending.append(rep)
 
-            pending.append(entry)
-
-        # 3. provider batch translation for what is left
+        # 3. provider batch translation for what is left (representatives)
         if pending:
             self._translate_pending(
                 pending, source_lang, target_lang, stats,
                 progress=progress,
                 log=log,
+                fanout=fanout,
+                persist=persist,
+                stop_event=stop_event,
+                pause_event=pause_event,
             )
 
         return stats
@@ -419,6 +470,10 @@ class RealTranslateStage:
         *,
         progress=None,
         log=None,
+        fanout: dict[int, list[LocalizationEntry]] | None = None,
+        persist=None,  # callable(chunk_entries) after each completed chunk
+        stop_event=None,  # duck-typed threading.Event: stop after this chunk
+        pause_event=None,  # duck-typed threading.Event: wait while set
     ) -> None:
         """Translate one provider-bound remainder with full observability.
 
@@ -427,6 +482,9 @@ class RealTranslateStage:
         and emits bounded milestone log lines. Progress advances ONLY on
         accepted translations (report clean AND QA clean AND staged);
         failures surface as [ALERT] lines and counts, never as progress.
+
+        Each completed chunk is handed to ``persist`` (crash recovery,
+        §30) and stop/pause events are honored between chunks (§29).
         """
         import time as _time
 
@@ -443,6 +501,18 @@ class RealTranslateStage:
                 log(message)
 
         for batch_id, start in enumerate(range(0, len(entries), batch_size), 1):
+            if pause_event is not None and pause_event.is_set():
+                emit(f"[PAUSE] paused at batch {batch_id}/{n_batches} — "
+                     f"waiting for resume...")
+                while pause_event.is_set():
+                    _time.sleep(0.2)
+                emit("[PAUSE] resumed.")
+            if stop_event is not None and stop_event.is_set():
+                stats.stopped = True
+                emit(f"[STOP] stopped at batch {batch_id}/{n_batches} "
+                     f"({accepted_cum}/{total} accepted) — resume reuses "
+                     f"cache/TM, nothing is lost.")
+                return
             chunk = entries[start : start + batch_size]
             requests = [self._build_request(e, source_lang, target_lang)
                         for e in chunk]
@@ -585,6 +655,26 @@ class RealTranslateStage:
                 entry.translation_model = self.provider.config.model
                 entry.translation_source = TranslationSource.MACHINE.value
                 stats.api_translated += 1
+                if fanout:
+                    # Same fingerprint ⇒ same text ⇒ same flags: share the
+                    # representative's outcome with every occurrence now
+                    # (not at the end — an abort must not strand them).
+                    for sibling in fanout.get(id(entry), ()):
+                        if sibling is entry:
+                            continue
+                        sibling.translated_text = entry.translated_text
+                        sibling.translation_source = entry.translation_source
+                        sibling.translation_provider = entry.translation_provider
+                        sibling.translation_model = entry.translation_model
+                        sibling.status = entry.status
+                        sibling.qa_flags = list(entry.qa_flags)
+                        if entry.status is EntryStatus.TRANSLATED:
+                            stats.accepted += 1
+                            accepted_cum += 1
+                        else:
+                            stats.rejected += 1
+                        if progress is not None:
+                            progress(accepted_cum, total)
                 if report.ok and self.cache is not None:
                     # Broken translations are persisted as FLAGGED for review
                     # but must never poison the cache as good translations.
@@ -659,6 +749,17 @@ class RealTranslateStage:
                              "untouched entries stay untranslated and retryable.",
                     ) from None
             self._record_batch(stats, health)
+            if persist is not None:
+                # Crash recovery (§30): every completed chunk (reps plus
+                # their fanned-out occurrences) is durable immediately —
+                # a kill/Ctrl+C keeps everything accepted so far.
+                to_save: list[LocalizationEntry] = []
+                for rep in chunk:
+                    to_save.append(rep)
+                    if fanout:
+                        to_save.extend(
+                            s for s in fanout.get(id(rep), ()) if s is not rep)
+                persist(to_save)
 
     @staticmethod
     def _record_batch(stats: TranslationStats, health: BatchHealth) -> None:
@@ -669,6 +770,25 @@ class RealTranslateStage:
 
 
 # ----- canary / preflight / health (§§3, 5, 12 of the incident) -----
+
+
+def unique_representatives(entries: list[LocalizationEntry],
+                           count: int) -> list[LocalizationEntry]:
+    """First ``count`` entries with distinct fingerprints (§15/§16).
+
+    A canary over 3 copies of one string proves nothing — probe distinct
+    sources (and, by fingerprint binding, distinct contexts).
+    """
+    seen: set[str] = set()
+    out: list[LocalizationEntry] = []
+    for entry in entries:
+        if entry.fingerprint in seen:
+            continue
+        seen.add(entry.fingerprint)
+        out.append(entry)
+        if len(out) >= count:
+            break
+    return out
 
 
 @dataclass
@@ -706,9 +826,10 @@ def run_canary(
     """
     from almurrib.core.model import EntryStatus as _Status
 
-    candidates = [e for e in entries
-                  if e.status is not _Status.OBSOLETE
-                  and not e.translated_text][:count]
+    candidates = unique_representatives(
+        [e for e in entries
+         if e.status is not _Status.OBSOLETE and not e.translated_text],
+        count)
     identity = f"{provider.config.provider}:{provider.config.model}"
     if log is not None:
         log(f"[CANARY] Testing provider {identity} on "

@@ -1,0 +1,4 @@
+# Normalize line endings once: repository stores LF, Windows checks out CRLF.
+# This ends the perpetual "modified, LF will be replaced by CRLF" noise
+# (verified: zero content diff with --ignore-cr-at-eol).
+* text=auto

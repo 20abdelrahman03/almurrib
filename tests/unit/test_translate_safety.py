@@ -365,6 +365,215 @@ def test_dry_run_spends_only_canary():
     assert Counting.calls == 1, "dry run spends exactly the canary batch"
 
 
+# Dedup §§15-16: canonical source + occurrence fan-out -------------------------
+def _dup_entry(text, line, context="ctx:same"):
+    ref = SourceRef(file="game/script.rpy", line=line)
+    return LocalizationEntry(
+        id=LocalizationEntry.make_id(EngineType.RENPY, text, ref),
+        engine=EngineType.RENPY, source_text=text, context=context,
+        source_refs=[ref], status=EntryStatus.UNTRANSLATED)
+
+
+def test_identical_strings_translate_once_and_fan_out():
+    """37× 'New Game' → 1 provider call, 37 identical translations."""
+    from tests.conftest import ArabicStubProvider
+
+    class Counting(ArabicStubProvider):
+        calls = 0
+
+        def translate_batch(self, requests):
+            Counting.calls += 1
+            return super().translate_batch(requests)
+
+    entries = [_dup_entry("New Game", i) for i in range(37)]
+    ids_before = [e.id for e in entries]
+    stats = _run(entries, Counting())
+    assert Counting.calls == 1, "one canonical request per fingerprint group"
+    assert stats.accepted == 37
+    assert stats.unique_groups == 1
+    assert stats.duplicate_occurrences == 36
+    assert len({e.translated_text for e in entries}) == 1
+    assert [e.id for e in entries] == ids_before, "ids/refs never rewritten"
+    assert {e.source_refs[0].line for e in entries} == set(range(37))
+
+
+def test_same_source_conflicting_context_translates_separately():
+    """§16: same text, different context → separate groups, separate calls."""
+    from tests.conftest import ArabicStubProvider
+
+    class Counting(ArabicStubProvider):
+        calls = 0
+
+        def translate_batch(self, requests):
+            Counting.calls += 1
+            return super().translate_batch(requests)
+
+    entries = ([_dup_entry("Charge!", i, context="ctx:battle") for i in range(3)]
+               + [_dup_entry("Charge!", i + 10, context="ctx:payment")
+                   for i in range(3)])
+    stats = _run(entries, Counting())
+    assert stats.unique_groups == 2
+    assert stats.duplicate_occurrences == 4
+    assert stats.accepted == 6
+    # One batch of 2 representatives (batch_size 20) — but two groups sent.
+    assert Counting.calls == 1
+
+
+def test_canary_probes_distinct_fingerprints():
+    """Canary over 3 copies of one string probes distinct sources."""
+    from almurrib.core.translate import unique_representatives
+
+    entries = ([_dup_entry("Same", i) for i in range(5)]
+               + [_dup_entry("Other", 10), _dup_entry("Third", 11)])
+    probe = unique_representatives(entries, 3)
+    assert [e.source_text for e in probe] == ["Same", "Other", "Third"]
+
+
+def test_fanout_survives_mid_run_abort():
+    """Abort strands no completed occurrence: fan-out is immediate."""
+    from almurrib.core.errors import TranslationAbortedError
+
+    seen_calls = []
+
+    class Flaky:
+        @property
+        def config(self):
+            return ProviderConfig(provider="s", model="t",
+                                  base_url="http://x.invalid", api_key="x")
+
+        def capabilities(self):
+            from almurrib.core.provider import ProviderCapabilities
+
+            return ProviderCapabilities(supports_batch=True)
+
+        def translate_batch(self, requests):
+            seen_calls.append(len(requests))
+            if len(seen_calls) == 1:
+                return _arabic_mapping(requests)
+            from almurrib.core.errors import InvalidResponseError
+
+            raise InvalidResponseError("model output was not a JSON object")
+
+    # 25 identical entries (1 group) + 90 unique → chunk1 succeeds for all
+    # 25, then failures abort; the 25 occurrences must all be translated.
+    entries = ([_dup_entry("Shared line", i) for i in range(25)]
+               + [_dup_entry(f"solo {i}", 100 + i) for i in range(90)])
+    stage = RealTranslateStage(Flaky(), abort_after_consecutive_failures=5)
+    try:
+        stage.run(entries, target_lang="ar")
+    except TranslationAbortedError:
+        pass
+    shared = entries[:25]
+    assert all(e.translated_text is not None for e in shared)
+
+
+# Stop / pause / crash-recovery §§29-30 -----------------------------------------
+def test_stop_event_halts_gracefully_with_partial_results():
+    """Stop finishes the current chunk, persists it, leaves rest pending."""
+    import threading
+
+    from tests.conftest import ArabicStubProvider
+
+    stop = threading.Event()
+    saved: list = []
+    entries = [_entry(f"stop line {i}", i) for i in range(60)]
+
+    def persist(chunk):
+        saved.extend(chunk)
+        if len(saved) >= 40:
+            stop.set()
+
+    stats = _run(entries, ArabicStubProvider(), persist=persist,
+                 stop_event=stop)
+    assert stats.stopped is True
+    assert stats.accepted == 40
+    assert len(saved) == 40
+    assert sum(1 for e in entries if e.translated_text) == 40
+    assert sum(1 for e in entries if not e.translated_text) == 20
+
+
+def test_pause_blocks_then_resumes():
+    """Pause waits mid-run; resume completes everything."""
+    import threading
+    import time
+
+    from tests.conftest import ArabicStubProvider
+
+    pause = threading.Event()
+    pause.set()
+    entries = [_entry(f"pause line {i}", i) for i in range(25)]
+
+    def release():
+        time.sleep(0.6)
+        pause.clear()
+
+    threading.Thread(target=release, daemon=True).start()
+    t0 = time.monotonic()
+    stats = _run(entries, ArabicStubProvider(), pause_event=pause)
+    assert time.monotonic() - t0 >= 0.5, "must actually have waited"
+    assert stats.accepted == 25 and not stats.stopped
+
+
+def test_crash_keeps_completed_chunks_via_persist():
+    """KeyboardInterrupt mid-run loses nothing already persisted."""
+    from tests.conftest import ArabicStubProvider
+
+    persisted: list = []
+    entries = [_entry(f"crash line {i}", i) for i in range(60)]
+
+    def persist(chunk):
+        persisted.extend(chunk)
+        if len(persisted) >= 40:
+            raise KeyboardInterrupt("simulated crash")
+
+    with pytest.raises(KeyboardInterrupt):
+        _run(entries, ArabicStubProvider(), persist=persist)
+    assert len(persisted) == 40
+    assert all(e.translated_text for e in persisted)
+
+
+def test_resume_continues_from_persisted_prefix():
+    """Stop + rerun: cache hits cover the prefix, provider does the rest."""
+    from almurrib.core.workflow import translate_entries
+    from almurrib.storage.database import Database
+    import tempfile
+    import threading
+    from pathlib import Path
+
+    from tests.conftest import ArabicStubProvider
+
+    tmp = Path(tempfile.mkdtemp())
+
+    class Counting(ArabicStubProvider):
+        calls = 0
+
+        def translate_batch(self, requests):
+            Counting.calls += 1
+            return super().translate_batch(requests)
+
+    def build(n):
+        return [_entry(f"resume line {i}", i) for i in range(n)]
+
+    with Database(tmp / "rs.db") as db:
+        from almurrib.storage.repository import EntryRepository
+
+        repo = EntryRepository(db)
+        project = repo.ensure_project("rs", str(tmp), EngineType.RENPY)
+        stop = threading.Event()
+
+        def on_progress(done, total):
+            if done >= 40:
+                stop.set()
+
+        s1 = translate_entries(build(60), db, Counting(), project_id=project.id,
+                               stop_event=stop, progress=on_progress)
+        assert s1.stopped is True and s1.accepted == 40
+        Counting.calls = 0
+        s2 = translate_entries(build(60), db, Counting(), project_id=project.id)
+        assert Counting.calls == 1, "only the 20 missing need the provider"
+        assert s2.accepted == 60  # 40 cache + 20 fresh
+
+
 # taxonomy unit checks ---------------------------------------------------------
 @pytest.mark.parametrize("exc_msg,category", [
     ("invalid key (HTTP 401)", "AUTH_ERROR"),

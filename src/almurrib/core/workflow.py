@@ -130,6 +130,9 @@ def translate_entries(
     progress=None,  # optional callable(accepted: int, total: int)
     log=None,  # optional callable(message: str) for milestone lines
     canary: bool | None = None,  # None = auto for large jobs (>100 pending)
+    persist_per_chunk: bool = True,  # durable progress for pause/stop/crash
+    stop_event=None,  # duck-typed threading.Event: graceful stop (§29)
+    pause_event=None,  # duck-typed threading.Event: wait while set (§29)
 ) -> TranslationStats:
     """Translate entries with TM + cache + provider, then persist.
 
@@ -185,9 +188,15 @@ def translate_entries(
         reuse_machine_tm=reuse_machine_tm,
         glossary=glossary,
     )
+    repo = EntryRepository(db)
+    persist_cb = None
+    if project_id is not None and persist_per_chunk:
+        def persist_cb(chunk_entries, _repo=repo, _pid=project_id):
+            _repo.upsert_many(_pid, chunk_entries)
     stats = stage.run(
         entries, source_lang=source_lang, target_lang=target_lang,
         progress=progress, log=log,
+        persist=persist_cb, stop_event=stop_event, pause_event=pause_event,
     )
     if project_id is not None:
         EntryRepository(db).upsert_many(project_id, entries)

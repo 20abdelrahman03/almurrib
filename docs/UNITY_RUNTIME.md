@@ -54,5 +54,24 @@ dump path must be confirmed from XUnity's own dump output first.
 ## Status
 
 Bundle generation: AUTOMATED VERIFIED (parser-compatible, property
-tests). In-game observation: UNVERIFIED (needs a user game + one
-launch; the bundle is ready for exactly that test).
+tests). In-game observation: VERIFIED on Hollow Knight (pause-menu
+Arabic through hooks on pristine assets; screenshots).
+
+## Reference: the ETR fan-translation pattern (verified by inspection)
+
+The shipped HKEtr mod (BepInEx 6 stack) solves the same boxes problem
+with three parts that mirror this document's architecture:
+
+1. Translated sheets as `<ObjectName>.txt` XML files (LOGICAL Arabic,
+   `&lt;page&gt;` entities kept) — byte-compatible with what
+   `generate_redirect_sheets` emits.
+2. A font AssetBundle (`etrhk`, UnityFS) carrying baked Arabic fonts.
+3. A Harmony plugin (`ContainsArabic`/`FontSetterPatch`/`FontReplacer`/
+   `RTLPatches`/`LoadCustomFonts`) that swaps fonts at runtime.
+
+We copy NO code from it (unknown license, game-specific). Consequences
+for Almurrib: (a) our redirect-sheet output is already interop-shaped;
+(b) static font-data surgery is confirmed insufficient (engine ignores
+new glyphs — baked atlas wins); the supported font paths remain
+system-font `OverrideFont` (zero build) or a user-built font bundle.
+Do NOT mix BepInEx 5 and BepInEx 6 installs in one game folder.

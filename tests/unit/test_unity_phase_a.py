@@ -92,6 +92,53 @@ def test_analyze_not_a_game(tmp_path):
                               Capability.RUNTIME_HOOK))
 
 
+def test_version_label_never_pretends(tmp_path):
+    game = _mono_game(tmp_path)
+    profile = A.analyze_game(game)
+    assert "confidence" in A.version_label(profile)
+    unknown = A.analyze_game(tmp_path / "empty")
+    assert "unknown" in A.version_label(unknown)
+
+
+def test_truncated_exe_never_kills_analysis(tmp_path):
+    game = _mono_game(tmp_path)
+    (game / "Game.exe").write_bytes(b"MZ")  # truncated header
+    profile = A.analyze_game(game)  # must not raise
+    assert profile.executable == "Game.exe"
+    assert profile.arch is None
+
+
+def test_executable_and_metadata_signals(tmp_path):
+    import struct as _struct
+
+    game = _mono_game(tmp_path)
+    blob = bytearray(b"MZ" + b"\x00" * 58 + _struct.pack("<I", 0x40))
+    blob += b"\x00" * (0x40 - len(blob)) + b"PE\x00\x00" + _struct.pack("<H", 0x8664)
+    (game / "Game.exe").write_bytes(bytes(blob))
+    meta = game / "Game_Data" / "il2cpp_data" / "Metadata"
+    meta.mkdir(parents=True)
+    (meta / "global-metadata.dat").write_bytes(b"\x00")
+    profile = A.analyze_game(game)
+    assert profile.executable == "Game.exe"
+    assert profile.metadata_dat
+
+
+def test_addressable_catalog_parsing(tmp_path):
+    import json
+
+    game = _mono_game(tmp_path)
+    streaming = game / "Game_Data" / "StreamingAssets"
+    streaming.mkdir(exist_ok=True)
+    (streaming / "catalog_1.json").write_text(json.dumps(
+        {"m_InternalIds": ["aa/bundle_a.bundle", "bundle_b.bundle"]}))
+    (streaming / "catalog_bad.json").write_text("{not json")
+    profile = A.analyze_game(game)
+    assert profile.addressables
+    assert sorted(profile.addressable_bundles) == [
+        "bundle_a.bundle", "bundle_b.bundle"]
+    assert any("unreadable catalog" in e for e in profile.evidence)
+
+
 def test_pe_arch_detection(tmp_path):
     import struct
 

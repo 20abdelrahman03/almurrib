@@ -54,6 +54,58 @@ def test_game_identity_stable_across_moves(tmp_path):
     assert W.game_identity(moved) == first
 
 
+# ----- security ---------------------------------------------------------
+
+def test_patch_path_traversal_refused(tmp_path):
+    """Entry-driven rel paths cannot escape the output dir (§26)."""
+    from almurrib.core.errors import ExportError
+    from almurrib.engine_adapters.unity.reinject import safe_output_path
+
+    out = tmp_path / "patch"
+    out.mkdir()
+    assert safe_output_path(out, "a/b.assets").parent == out / "a"
+    for evil in ("../evil.assets", "../../x.assets", "..\\win.assets",
+                 "/abs.assets"):
+        try:
+            safe_output_path(out, evil)
+        except ExportError:
+            continue
+        raise AssertionError(f"traversal accepted: {evil}")
+
+
+def test_workspace_copy_failure_is_clean(monkeypatch, tmp_path):
+    """Disk/permission errors become ExportError, not tracebacks (§45)."""
+    import shutil as _shutil
+
+    from almurrib.core.errors import ExportError
+    from almurrib.engine_adapters.unity import workspace as W
+
+    game = tmp_path / "G"
+    (game / "G_Data").mkdir(parents=True)
+    monkeypatch.setattr(_shutil, "copytree",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            OSError("disk full")))
+    try:
+        W.prepare_workspace(game, tmp_path / "work")
+    except ExportError as exc:
+        assert "disk full" in str(exc)
+    else:
+        raise AssertionError("expected ExportError")
+
+
+def test_resume_workspace_reuses_complete_copy(tmp_path):
+    from almurrib.engine_adapters.unity import workspace as W
+
+    game = tmp_path / "G"
+    (game / "G_Data").mkdir(parents=True)
+    (game / "G_Data" / "a.assets").write_bytes(b"bytes")
+    ws = W.prepare_workspace(game, tmp_path / "work")
+    resumed = W.resume_workspace(tmp_path / "work", ws.game_id)
+    assert resumed is not None and resumed.game_id == ws.game_id
+    assert W.resume_workspace(tmp_path / "work", "other-id") is None
+    assert W.resume_workspace(tmp_path / "nowhere", ws.game_id) is None
+
+
 # ----- tools ------------------------------------------------------------
 
 

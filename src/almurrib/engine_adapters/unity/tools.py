@@ -54,6 +54,19 @@ REGISTRY: tuple[ToolInfo, ...] = (
              "runtime translation overlay (reads our generated files)",
              "extract the BepInEx (or IL2CPP) zip into the game folder",
              "https://github.com/bbepis/XUnity.AutoTranslator/releases/tag/v5.6.2"),
+    ToolInfo("assetripper", "AssetRipper", "AssetRipper/AssetRipper",
+             "rolling master", "GPL-3.0 (external-only: never vendored/linked)",
+             "external",
+             "extraction fallback: exports games to Unity-project format "
+             "(TextAssets as files, behaviours as YAML)",
+             "download release or AssetRipper-CLI fork; point tool at game",
+             "https://github.com/AssetRipper/AssetRipper"),
+    ToolInfo("il2cppdumper", "Il2CppDumper", "Perfare/Il2CppDumper",
+             "rolling master", "MIT", "external",
+             "IL2CPP static analysis only: dump.cs + metadata JSON "
+             "(never binary patching)",
+             "run Il2CppDumper.exe on the game exe + metadata file",
+             "https://github.com/Perfare/Il2CppDumper"),
     ToolInfo("anyfontunity", "AnyFontUnity", "xSh4r103/AnyFontUnity",
              "2026-09 (immature)", "MIT", "reference",
              "font-injection ideas only — too new to depend on",
@@ -90,6 +103,13 @@ def probe(key: str, game_dir: Path | None = None) -> ToolStatus:
         return ToolStatus(key, bool(found), found or "not on PATH")
     if key == "cpp2il":
         found = shutil.which("Cpp2IL") or shutil.which("Cpp2IL.exe")
+        return ToolStatus(key, bool(found), found or "not on PATH")
+    if key == "assetripper":
+        found = _which_any(("AssetRipper.exe", "AssetRipper",
+                             "AssetRipper.CLI.exe"))
+        return ToolStatus(key, bool(found), found or "not on PATH")
+    if key == "il2cppdumper":
+        found = _which_any(("Il2CppDumper.exe", "Il2CppDumper"))
         return ToolStatus(key, bool(found), found or "not on PATH")
     if key == "bepinex":
         root = Path(game_dir) if game_dir else None

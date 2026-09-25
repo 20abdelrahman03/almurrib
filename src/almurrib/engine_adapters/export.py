@@ -22,6 +22,7 @@ def export_for_engine(
     output_dir: Path,
     target_lang: str,
     project_id: int | None = None,
+    visual_arabic: bool = False,
 ) -> list[Path]:
     """Generate output files for one engine from stored translations."""
     repo = EntryRepository(db)
@@ -58,7 +59,8 @@ def export_for_engine(
             if e.translated_text and e.status is not EntryStatus.OBSOLETE
         ]
         return write_asset_patch(entries, game_root=game_dir.resolve(),
-                                 output_dir=output_dir)
+                                 output_dir=output_dir,
+                                 visual_arabic=visual_arabic)
     raise ExportError(
         f"export not implemented for engine '{engine.value}'",
         hint="supported in Phase 3: Ren'Py, RPG Maker MV/MZ, Unity.",

@@ -9,6 +9,7 @@ ImportError traceback. Detection needs no UnityPy at all (magic sniff).
 from __future__ import annotations
 
 import html as _html
+import os as _os
 import re as _re
 import unicodedata
 from collections import Counter
@@ -239,11 +240,12 @@ def _apply_text_asset(asset, container: str,
                 whole_new = new
             continue
         key = match.group(1)
-        if key not in current:
-            problems.append(f"entry[{key}]: key gone from blob (stale?)")
-        elif current[key] != old:
-            problems.append(f"entry[{key}]: source changed since extraction")
-        else:
+        # Object-scoped matching (field-test find on resources.assets):
+        # sibling sheets (other languages) share key names but carry
+        # different text. A key stages ONLY where key AND old text both
+        # match this blob; anything never staged anywhere is reported
+        # stale by the caller, not here.
+        if key in current and current[key] == old:
             staged[key] = new
     if staged and whole_new is not None:
         problems.append("mixed whole-blob and element replacements")
@@ -258,6 +260,31 @@ def _apply_text_asset(asset, container: str,
         asset.m_Script = whole_new
         asset.save()
     return problems
+
+
+def unapplied_element_keys(asset_blobs: list[tuple[str, str]],
+                           replacements: dict[tuple[str, str, str], str]
+                           ) -> list[str]:
+    """Element keys no blob accepted (genuinely stale translations).
+
+    ``asset_blobs`` is (container, m_Script) per TextAsset object.
+    Called after all objects so sibling-language sheets had their chance.
+    """
+    wanted: dict[tuple[str, str, str], str] = {}
+    for (c, f, old), new in replacements.items():
+        match = SHEET_FIELD_RE.match(f or "")
+        if match is not None:
+            wanted[(c, match.group(1), old)] = new
+    for container, blob in asset_blobs:
+        if not isinstance(blob, str) or not blob:
+            continue
+        current = dict(split_sheet_elements(blob) or [])
+        for key in list(wanted):
+            c, k, old = key
+            if c == container and current.get(k) == old:
+                del wanted[key]
+    return [f"entry[{k}]: no sheet holds this source text (stale?)"
+            for (_, k, _) in wanted]
 
 
 def sheet_language(object_name: str) -> str | None:
@@ -298,9 +325,17 @@ def apply_translations(asset_path: Path, replacements: dict[tuple[str, str, str]
     except Exception as exc:
         raise ExtractionError(
             f"UnityPy cannot parse '{asset_path}': {exc}") from exc
+    def _objects(file):
+        # UnityPy hands dicts (path_id -> reader) or plain lists depending
+        # on file kind — iterating a dict yields int keys (field-test find
+        # on resources.assets: "'int' object has no attribute 'type'").
+        objs = file.objects
+        return objs.values() if isinstance(objs, dict) else objs
+
     problems: list[str] = []
+    blobs: list[tuple[str, str]] = []
     for _, file in env.files.items():
-        for obj in file.objects:
+        for obj in _objects(file):
             class_name = getattr(obj.type, "name", "?")
             try:
                 container = str(file.container.get(getattr(obj, "path_id", None), ""))
@@ -309,6 +344,10 @@ def apply_translations(asset_path: Path, replacements: dict[tuple[str, str, str]
             try:
                 if class_name == "TextAsset":
                     asset = obj.read()
+                    # Snapshot BEFORE applying: staleness is judged against
+                    # original sources, never our own translations.
+                    blobs.append((container,
+                                  getattr(asset, "m_Script", "")))
                     asset_problems = _apply_text_asset(
                         asset, container, replacements)
                     problems.extend(
@@ -319,6 +358,7 @@ def apply_translations(asset_path: Path, replacements: dict[tuple[str, str, str]
                         obj.save_typetree(tree)
             except Exception:
                 continue
+    problems.extend(unapplied_element_keys(blobs, replacements))
     if problems:
         raise ExtractionError(
             f"Unity asset '{asset_path}' write-back refused:\n" +
@@ -328,6 +368,9 @@ def apply_translations(asset_path: Path, replacements: dict[tuple[str, str, str]
     # Capability-based (no fragile type imports): any loaded file object
     # whose save() returns bytes is rebuildable. Bundle inputs need
     # bundle-aware rebuilds (documented limitation) and are skipped.
+    # Atomic output (§13): stage to a temp sibling, validate by reparse
+    # (§31), then replace — a failed validation never leaves a
+    # half-patched file behind.
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     for _, file in env.files.items():
         save = getattr(file, "save", None)
@@ -342,11 +385,50 @@ def apply_translations(asset_path: Path, replacements: dict[tuple[str, str, str]
                 f"UnityPy cannot rebuild '{asset_path}': {exc}") from exc
         if not isinstance(payload, (bytes, bytearray)):
             continue
-        dest_path.write_bytes(bytes(payload))
+        staging = dest_path.with_name(dest_path.name + ".tmp")
+        staging.write_bytes(bytes(payload))
+        try:
+            validate_patch(staging)
+        except ExtractionError:
+            try:
+                staging.unlink()
+            except OSError:
+                pass
+            raise
+        _os.replace(staging, dest_path)
         return dest_path
     raise ExtractionError(
         f"no rebuildable Unity asset file inside '{asset_path}'",
         hint="asset bundles (.ab) need bundle-aware rebuilds (unsupported).")
+
+
+def validate_patch(staged: Path) -> int:
+    """Re-parse a rebuilt asset; return its object count (§31).
+
+    Raises ExtractionError when the output does not load — the caller
+    must then refuse to place it (atomicity).
+    """
+    UnityPy = require_unitypy()
+    try:
+        # From memory, not from the path: UnityPy keeps source files
+        # open, and Windows refuses to move/rename an open file
+        # (field-test find: WinError 32 on os.replace after reparse).
+        env = UnityPy.load(staged.read_bytes())
+    except Exception as exc:
+        raise ExtractionError(
+            f"rebuilt asset '{staged.name}' does not re-parse: {exc}",
+            hint="the patch was discarded; originals untouched.",
+        ) from exc
+    total = 0
+    try:
+        for _, file in env.files.items():
+            objects = file.objects.values() \
+                if isinstance(file.objects, dict) else file.objects
+            total += sum(1 for _ in objects)
+    except Exception as exc:
+        raise ExtractionError(
+            f"rebuilt asset '{staged.name}' census failed: {exc}") from exc
+    return total
 
 
 @dataclass

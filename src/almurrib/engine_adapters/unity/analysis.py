@@ -55,9 +55,16 @@ class UnityGameProfile:
     game_dir: Path
     data_dirs: list[str] = field(default_factory=list)
     unity_version: str | None = None
+    # Where the version came from: header marker (high confidence) or
+    # nothing (unknown — never presented as certain, see version_label).
+    version_confidence: str = "unknown"
+    executable: str | None = None
+    metadata_dat: bool = False
     backend: Backend = Backend.UNKNOWN
     arch: str | None = None
     managed_assemblies: list[str] = field(default_factory=list)
+    addressable_catalogs: list[str] = field(default_factory=list)
+    addressable_bundles: list[str] = field(default_factory=list)
     streaming_assets: bool = False
     resources_dirs: int = 0
     # Unity <= 4.x ships `mainData`; Unity >= 5 ships `globalgamemanagers`.
@@ -104,22 +111,33 @@ def analyze_game(game_dir: Path) -> UnityGameProfile:
         profile.pre5_era_layout = True
         profile.evidence.append("pre-5.x layout (mainData, no globalgamemanagers)")
 
-    profile.unity_version = _detect_version(data_dirs)
+    profile.unity_version = _detect_version(data_dirs, profile)
     _detect_backend(game_dir, data_dirs, profile)
     profile.arch = _detect_arch(game_dir, profile)
     _scan_managed(data_dirs, profile)
     _scan_content(game_dir, data_dirs, profile)
+    _scan_executable(game_dir, profile)
     _scan_frameworks(game_dir, profile)
     return profile
 
 
-def _detect_version(data_dirs: list[Path]) -> str | None:
+def version_label(profile: UnityGameProfile) -> str:
+    """Honest version display: never pretend certainty (§4)."""
+    if profile.unity_version:
+        return (f"Unity {profile.unity_version} "
+                f"(confidence {profile.version_confidence})")
+    return "Unity version unknown (no readable marker)"
+
+
+def _detect_version(data_dirs: list[Path],
+                    profile: UnityGameProfile) -> str | None:
     for data_dir in data_dirs:
         for name in ("globalgamemanagers", "mainData", "data.unity3d"):
             candidate = data_dir / name
             if candidate.is_file():
                 version = sniff_version(candidate)
                 if version and version != "unknown":
+                    profile.version_confidence = "high (header marker)"
                     return version
     return None
 
@@ -156,8 +174,8 @@ def _detect_arch(game_dir: Path, profile: UnityGameProfile) -> str | None:
                 (pe_offset,) = struct.unpack("<I", handle.read(4))
                 handle.seek(pe_offset + 4)
                 (machine,) = struct.unpack("<H", handle.read(2))
-        except OSError:
-            continue
+        except (OSError, struct.error, ValueError):
+            continue  # truncated/malicious headers never kill analysis
         arch = _PE_MACHINES.get(machine)
         if arch:
             profile.evidence.append(f"architecture {arch} ({exe.name})")
@@ -202,6 +220,54 @@ def _scan_content(game_dir: Path, data_dirs: list[Path],
         profile.evidence.append("StreamingAssets present")
     if profile.bundles:
         profile.evidence.append(f"{len(profile.bundles)} asset bundle(s)")
+    _scan_addressable_catalogs(data_dirs, profile)
+
+
+def _scan_addressable_catalogs(data_dirs: list[Path],
+                               profile: UnityGameProfile) -> None:
+    """Parse Addressables catalog JSON (plain JSON — safe, stdlib).
+
+    Catalogs list every addressable bundle id; malformed catalogs are
+    skipped with evidence (never a crash). This feeds bundle strategy
+    without touching Unity serialization.
+    """
+    import json
+
+    for data_dir in data_dirs:
+        streaming = data_dir / "StreamingAssets"
+        if not streaming.is_dir():
+            continue
+        for catalog in sorted(streaming.glob("catalog_*.json")):
+            profile.addressable_catalogs.append(catalog.name)
+            try:
+                data = json.loads(catalog.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                profile.evidence.append(f"unreadable catalog ({catalog.name})")
+                continue
+            ids = data.get("m_InternalIds") if isinstance(data, dict) else None
+            if isinstance(ids, list):
+                profile.addressables = True
+                profile.addressable_bundles.extend(
+                    str(i).split("/")[-1] for i in ids
+                    if isinstance(i, str) and i.strip())
+    if profile.addressable_catalogs:
+        profile.evidence.append(
+            f"{len(profile.addressable_catalogs)} addressable catalog(s), "
+            f"{len(profile.addressable_bundles)} bundle ref(s)")
+
+
+def _scan_executable(game_dir: Path, profile: UnityGameProfile) -> None:
+    """Record the game exe and IL2CPP metadata presence (§4 signals)."""
+    exes = sorted(p for p in game_dir.glob("*.exe") if p.is_file())
+    if exes:
+        profile.executable = exes[0].name
+    for data_dir in profile.data_dirs:
+        meta = (game_dir / data_dir / "il2cpp_data" / "Metadata"
+                / "global-metadata.dat")
+        if meta.is_file():
+            profile.metadata_dat = True
+            profile.evidence.append("global-metadata.dat present")
+            break
 
 
 def _scan_frameworks(game_dir: Path, profile: UnityGameProfile) -> None:

@@ -42,6 +42,42 @@ purpose; never vendor without license justification.
   manager only records presence/version. LGPL-safe (separate program).
 - Result: accepted as user-side prerequisite, documented as such.
 
+## Accepted (super-refactor delta, researched 2026-09-22)
+
+### AssetRipper/AssetRipper — optional external extraction fallback
+- **GPL-3.0** (verified `LICENSE.md`) · C# · very active (8.4k stars,
+  commits current week). Successor of the archived AssetStudio.
+- Exports whole games to Unity-project format (TextAssets as files,
+  MonoBehaviours as YAML) — a viable extraction fallback when UnityPy
+  cannot parse an asset. GUI app; headless use via the
+  **MeikoMei16/AssetRipper-CLI** fork (active 2026, profile-based export).
+- Integration: **external program only, never vendored, never linked**
+  (GPL boundary respected: we read its *exported data files*, which are
+  the game's own data, not its code). Tool manager records presence.
+- Result: accepted as the documented fallback behind UnityPy.
+
+### Perfare/Il2CppDumper — optional external IL2CPP analysis
+- **MIT** (verified `LICENSE`) · C# · very active (9.4k stars).
+- Console builds dump `il2cpp_data/Metadata/global-metadata.dat` into
+  `dump.cs` + script JSON (types, fields, metadata string table) —
+  the only safe static window into IL2CPP text discovery.
+- Integration: **external CLI** (`Il2CppDumper.exe game.exe`),
+  user-downloaded; we parse its *output files*, never its code.
+  Never for binary patching — analysis only.
+- Result: accepted for the IL2CPP_ANALYSIS capability.
+
+### BepInEx-bundled stack — no separate integration
+- **HarmonyX, Unity Doorstop, Il2CppInterop (BepInEx/Il2CppInterop,
+  active Sept 2026)**: all ship INSIDE the BepInEx 5/6 distributions
+  we already register. Registering them separately would double-count
+  one install. The tool manager notes them as BepInEx components.
+
+### FairyGUI — covered via XUnity, no new work
+- **fairygui/FairyGUI-unity** (active, 3k stars) is a UI framework games
+  are built with, not a translation tool. XUnity already hooks it
+  (listed in its text frameworks), so our runtime path covers
+  FairyGUI games through file interop. No integration needed.
+
 ## Dev / reference only
 
 - **nesrak1/UABEANext** — rewrite for multi-bundle research; watch, no integration yet.

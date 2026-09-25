@@ -17,13 +17,36 @@ from almurrib.core.model import LocalizationEntry
 from almurrib.engine_adapters.unity.unityfs import apply_translations
 
 
+def safe_output_path(output_dir: Path, rel: str) -> Path:
+    """Join an entry-driven relative path without escaping (§26).
+
+    Entry ``ref.file`` values normally come from our own extractors
+    (always safe), but stored rows are data: absolute paths and ``..``
+    segments are refused loudly instead of writing outside the patch.
+    """
+    base = output_dir.resolve()
+    candidate = (output_dir / rel).resolve()
+    if candidate != base and base not in candidate.parents:
+        raise ExportError(
+            f"refusing to write outside the output dir: {rel!r}",
+            hint="entry source refs must be game-relative paths.",
+        )
+    return candidate
+
+
 def write_asset_patch(
     entries: list[LocalizationEntry],
     *,
     game_root: Path,
     output_dir: Path,
+    visual_arabic: bool = False,
 ) -> list[Path]:
-    """Rebuild translated asset files mirroring the game layout."""
+    """Rebuild translated asset files mirroring the game layout.
+
+    ``visual_arabic`` derives shaped visual-order text at write time for
+    shaper-less legacy renderers (Unity UI Text). The database always
+    keeps canonical logical text; shaping is applied exactly once here.
+    """
     by_file: dict[str, list[LocalizationEntry]] = {}
     for entry in entries:
         if not entry.translated_text:
@@ -49,12 +72,18 @@ def write_asset_patch(
         replacements = {}
         for entry in file_entries:
             extra = entry.source_refs[0].extra
+            text = entry.translated_text or ""
+            if visual_arabic and text:
+                from almurrib.engine_adapters.unity.visual import visualize
+
+                text = visualize(text)
             replacements[(extra.get("container", ""),
                           extra.get("field", ""),
-                          entry.source_text)] = entry.translated_text or ""
+                          entry.source_text)] = text
         try:
             written.append(apply_translations(
-                source, replacements, dest_path=output_dir / rel))
+                source, replacements,
+                dest_path=safe_output_path(output_dir, rel)))
         except (ExportError, ExtractionError) as exc:
             failures.append(f"{rel}: {exc}")
         except Exception as exc:

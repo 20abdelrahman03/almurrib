@@ -56,19 +56,45 @@ def test_apply_element_end_to_end():
     assert "A &lt;page&gt; break." in asset.m_Script  # neighbor preserved
 
 
-def test_apply_stale_key_refused():
+def test_apply_skips_foreign_keys_silently_per_object():
+    # Per-object matching stages only what THIS blob holds; staleness is
+    # judged file-wide (unapplied_element_keys), so sibling-language
+    # sheets never poison each other.
     asset = _Sheet(BLOB)
     problems = _apply_text_asset(
         asset, "", {("", "entry[GHOST]", "Hi"): "مرحبا"})
-    assert problems and not asset.saved
+    assert problems == [] and not asset.saved
     assert asset.m_Script == BLOB
 
 
-def test_apply_changed_source_refused():
+def test_apply_changed_source_skipped_per_object():
     asset = _Sheet(BLOB)
     problems = _apply_text_asset(
         asset, "", {("", "entry[K1]", "WRONG OLD"): "مرحبا"})
-    assert problems and not asset.saved
+    assert problems == [] and not asset.saved
+
+
+def test_unapplied_keys_reported_file_wide():
+    from almurrib.engine_adapters.unity.unityfs import unapplied_element_keys
+
+    assert unapplied_element_keys(
+        [("", BLOB)], {("", "entry[GHOST]", "Hi"): "x"}) != []
+    assert unapplied_element_keys(
+        [("", BLOB)], {("", "entry[K1]", "Hello."): "x"}) == []
+
+
+def test_sibling_sheets_route_to_matching_blob():
+    """EN + FR sheets share keys: EN translations land in the EN blob."""
+    from almurrib.engine_adapters.unity.unityfs import unapplied_element_keys
+
+    fr = BLOB.replace("Hello.", "Bonjour.").replace(
+        "A &lt;page&gt; break.", "Une pause.")
+    # What apply_translations checks file-wide after per-object staging:
+    blobs = [("", BLOB), ("", fr)]
+    reps = {("", "entry[K1]", "Hello."): "مرحبا."}
+    assert unapplied_element_keys(blobs, reps) == []
+    # ...but the FR blob alone cannot satisfy it:
+    assert unapplied_element_keys([("", fr)], reps) != []
 
 
 def test_apply_mixed_whole_and_element_prefers_elements_loudly():
@@ -98,7 +124,9 @@ def _env_with_sheet(blob):
                 raise RuntimeError("cannot parse")
             obj = types.SimpleNamespace(type=types.SimpleNamespace(name="TextAsset"),
                                         path_id=1)
-            holder["asset"] = _Sheet(blob)
+            # Stable file: repeated loads see the same asset object.
+            if "asset" not in holder:
+                holder["asset"] = _Sheet(blob)
             obj.read = lambda: holder["asset"]
             fake_file = types.SimpleNamespace(
                 objects=[obj], container={1: ""},
